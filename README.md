@@ -1,10 +1,10 @@
 # NerfTrack
 
-## 👤 Author & Creator
+## Fork origin
 
-**Lead Developer / Founder:** **Ayaan Lashari**** -Original creator and main maintainer of this project.**
+This repository is a fork of [NerfTrack/NerfTrack](https://github.com/NerfTrack/NerfTrack). The original project was created and maintained by Ayaan Lashari.
 
-If you would like to contribute or report a bug, please feel free to open an issue or submit a pull request!
+For changes in this fork, open an issue or pull request in this repository.
 
 NerfTrack is a local-only Tauri desktop app that reads Codex usage records and estimates their API-equivalent weekly value. It stores aggregate usage, quota, and diagnostic data on the same machine; prompts, raw JSONL records, credentials, account identifiers, and complete local paths are not returned through the app UI.
 

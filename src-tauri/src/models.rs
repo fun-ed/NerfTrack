@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // existing derived data is invalidated and rebuilt deterministically.
 pub const ALGORITHM_VERSION: &str = "nerftrack-token-api-equivalent-v5";
 /// This is deliberately independent from the SQLite schema and estimator versions.
-pub const PRICING_RULE_VERSION: &str = "models-dev-openai-pricing-v3";
+pub const PRICING_RULE_VERSION: &str = "models-dev-provider-pricing-v4";
 pub const RECONSTRUCTION_VERSION: &str = "weekly-window-reconstruction-v5";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +220,30 @@ pub struct HistoryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUsageSummary {
+    pub profile_id: String,
+    pub harness: String,
+    pub label: String,
+    pub available: bool,
+    pub event_count: i64,
+    pub priced_event_count: i64,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+    pub estimated_cost_usd: Option<f64>,
+    pub reported_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUsageResponse {
+    pub summaries: Vec<HarnessUsageSummary>,
+    pub total: HarnessUsageSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnnotationKind {
     Reset,
@@ -308,8 +332,6 @@ pub struct AppSettings {
     pub telemetry: bool,
     pub auto_updater: bool,
     #[serde(default)]
-    pub starter_page_seen: bool,
-    #[serde(default)]
     pub installation_marker: String,
     #[serde(default)]
     pub custom_pricing: Vec<CustomPriceOverride>,
@@ -358,7 +380,6 @@ impl Default for AppSettings {
             local_only: true,
             telemetry: false,
             auto_updater: false,
-            starter_page_seen: false,
             installation_marker: String::new(),
             custom_pricing: Vec::new(),
         }
@@ -366,14 +387,6 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    pub fn should_reset_starter_page_for_reinstall(
-        &self,
-        current_installation_marker: &str,
-    ) -> bool {
-        !self.installation_marker.is_empty()
-            && self.installation_marker != current_installation_marker
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         self.advanced.validate()?;
         for price in &self.custom_pricing {
@@ -424,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_before_the_starter_page_defaults_to_unseen() {
+    fn settings_from_before_the_installation_marker_defaults_empty() {
         let settings: AppSettings = serde_json::from_str(
             r#"{
                 "refreshIntervalSeconds": 10,
@@ -440,19 +453,6 @@ mod tests {
             }"#,
         )
         .expect("legacy settings should remain readable");
-        assert!(!settings.starter_page_seen);
         assert!(settings.installation_marker.is_empty());
-    }
-
-    #[test]
-    fn a_reinstall_marker_change_resets_starter_page() {
-        let settings = AppSettings {
-            starter_page_seen: true,
-            installation_marker: "old-install".into(),
-            ..AppSettings::default()
-        };
-
-        assert!(settings.should_reset_starter_page_for_reinstall("new-install"));
-        assert!(!settings.should_reset_starter_page_for_reinstall("old-install"));
     }
 }

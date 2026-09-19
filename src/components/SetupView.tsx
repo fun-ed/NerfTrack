@@ -1,10 +1,11 @@
-import type { AppSettings, AppStatus } from '../domain';
+import type { AppSettings, AppStatus, HarnessUsageResponse } from '../domain';
 import { useI18n, type MessageKey } from '../i18n';
 import { Icon, type IconName } from './Icons';
 
 interface SetupViewProps {
   status: AppStatus;
   settings: AppSettings;
+  harnessUsage: HarnessUsageResponse;
   onChooseHome: () => void;
   onChooseExecutable: () => void;
   onRetry: () => void;
@@ -60,6 +61,7 @@ const discoveryStateKeys: Record<AppStatus['codexHome']['state'], MessageKey> = 
 export function SetupView({
   status,
   settings,
+  harnessUsage,
   onChooseHome,
   onChooseExecutable,
   onRetry,
@@ -72,8 +74,35 @@ export function SetupView({
     <section className="setup-page page-shell">
       <header className="page-heading">
         <h1>{t('setup.title')}</h1>
-        <p>{t(guiMode ? 'setup.description.desktop' : 'setup.description.cli')}</p>
+        <p>{t('setup.description')}</p>
       </header>
+      <section className="panel harness-usage setup-harness-usage" aria-labelledby="setup-harness-heading">
+        <div className="panel-heading">
+          <Icon name="terminal" size={23} />
+          <div>
+            <h2 id="setup-harness-heading">{t('setup.harnessSources')}</h2>
+            <span>{t('setup.harnessDescription')}</span>
+          </div>
+        </div>
+        <div className="harness-rows" role="list">
+          {harnessUsage.summaries.map((summary) => (
+            <div className="harness-row" key={summary.profileId} role="listitem">
+              <div>
+                <strong>{summary.label}</strong>
+                <span>
+                  {summary.available ? t('discovery.auto_detected') : t('setup.notDiscovered')}
+                </span>
+              </div>
+              <span>{summary.eventCount.toLocaleString()} {t('setup.events')}</span>
+              <span>{summary.available ? t('setup.monitoring') : t('setup.waiting')}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+      <div className="setup-codex-heading">
+        <h2>{t('setup.codexConfiguration')}</h2>
+        <p>{t('setup.codexConfigurationDescription')}</p>
+      </div>
       <div className="discovery-grid">
         {discoveryCards.map((card) => {
           const discovery = status[card.key];

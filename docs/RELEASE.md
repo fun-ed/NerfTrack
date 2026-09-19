@@ -6,6 +6,16 @@ Pull-request CI runs the frontend, Rust, and Tauri packaging smoke checks on `ma
 
 Signing and notarization are secret-driven release steps and are not part of pull-request CI. Certificates, API keys, signing identities, generated local databases, and audit snapshots must never be committed or uploaded. NerfTrack's original source code is licensed under GPL-3.0-only; third-party components retain their respective licenses.
 
+## 1.1.8 — 2026-09-20
+
+- Added cumulative API-equivalent usage views for supported local harnesses and profiles.
+- Removed automatic GitHub update checks; manual checks use this fork's release repository.
+
+## 1.1.7 — 2026-09-20
+
+- Added local multi-harness usage aggregation for Codex, Claude profiles, OMP, Copilot, and Kiro.
+- Added provider-specific models.dev pricing with cache-write token accounting and the All Harness dashboard panel.
+
 ## 1.1.6 — 2026-09-04
 
 - Added built-in GPT-6 Astra pricing with input, cached-input, output, long-context, and Fast-mode accounting.

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App, { HomeView } from './App';
 import type { HistoryPoint, HistoryResponse } from './domain';
-import { demoQuote, demoStatus } from './lib/fixtures';
+import { demoHarnessUsage, demoQuote, demoStatus } from './lib/fixtures';
 
 function historyPoint(overrides: Partial<HistoryPoint> = {}): HistoryPoint {
   return {
@@ -47,6 +47,7 @@ function renderHomeWithHistory(history: HistoryResponse) {
       quote={demoQuote}
       history={history}
       annotations={[]}
+      harnessUsage={demoHarnessUsage}
       range="1D"
       reducedMotion={false}
       isRefreshing={false}
@@ -75,9 +76,10 @@ function renderHomeWithHistory(history: HistoryResponse) {
 describe('NerfTrack app shell', () => {
   it('renders the dashboard reference surface with a non-zero quote', async () => {
     render(<App />);
-    expect(await screen.findByText('Codex Weekly API-equivalent Estimator')).toBeInTheDocument();
+    expect(await screen.findByText('All Harness usage')).toBeInTheDocument();
     expect(screen.getAllByText('≈$371').length).toBeGreaterThan(0);
-    expect(screen.getByText('Weekly Used')).toBeInTheDocument();
+    expect(screen.getByText('Priced events')).toBeInTheDocument();
+    expect(screen.getAllByText('All Harness').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Refresh data' })).toBeInTheDocument();
     expect(screen.getByText(/Live ·/)).toBeInTheDocument();
     expect(await screen.findByText('CLI Mode · 846 usage events observed')).toBeInTheDocument();
@@ -85,7 +87,7 @@ describe('NerfTrack app shell', () => {
 
   it('keeps refresh beside the ranges and share as the final hero action', async () => {
     render(<App />);
-    await screen.findByText('Codex Weekly API-equivalent Estimator');
+    await screen.findByText('All Harness usage');
 
     const rangeTabs = screen.getByRole('tablist', { name: 'History range' });
     const controls = rangeTabs.parentElement;
@@ -129,7 +131,7 @@ describe('NerfTrack app shell', () => {
     expect(screen.getByRole('button', { name: '重置所有数据' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '首页' }));
-    expect(screen.getByRole('heading', { name: 'Codex 每周 API 等值估算' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '全部 Harness 用量' })).toBeInTheDocument();
     expect(screen.getByText('本周已使用')).toBeInTheDocument();
     expect(screen.getByText('稳定的每周 API 等值')).toBeInTheDocument();
     expect(screen.getByText('已观测 Token 成本')).toBeInTheDocument();
@@ -169,6 +171,7 @@ describe('NerfTrack app shell', () => {
         quote={{ ...demoQuote, confidence: 'low', validObservationCount: 1 }}
         history={customHistory([historyPoint()])}
         annotations={[]}
+        harnessUsage={demoHarnessUsage}
         range="1D"
         reducedMotion={false}
         isRefreshing={false}
@@ -199,7 +202,7 @@ describe('NerfTrack app shell', () => {
     await user.selectOptions(screen.getByLabelText('Language'), 'zh-TW');
     await user.click(screen.getByRole('button', { name: '首頁' }));
 
-    expect(screen.getByRole('heading', { name: 'Codex 每週 API 等值估算' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '全部 Harness 用量' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重新整理資料' })).toBeInTheDocument();
   });
 
@@ -249,19 +252,14 @@ describe('NerfTrack app shell', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
 
-  it('keeps the GitHub update control and starter page accessible from settings', async () => {
+  it('keeps the GitHub update control out of the removed starter page flow', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByRole('button', { name: 'Up to date' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Check for updates' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    await user.click(screen.getByRole('button', { name: 'Open starter page again' }));
-
-    expect(screen.getByRole('heading', { name: 'Help NerfTrack keep going.' })).toBeInTheDocument();
-    expect(screen.getByText('Let the resets continue')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Star NerfTrack on GitHub/ })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Continue without starring' })).toBeInTheDocument();
-    expect(screen.queryByText(/follow on X/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open starter page again' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Help NerfTrack keep going.')).not.toBeInTheDocument();
   });
 
   it('offers fast checkpoint restore and a separate full log import', async () => {
@@ -345,6 +343,7 @@ describe('NerfTrack app shell', () => {
         quote={demoQuote}
         history={customHistory([historyPoint()])}
         annotations={[]}
+        harnessUsage={demoHarnessUsage}
         range="1D"
         reducedMotion={false}
         isRefreshing={false}

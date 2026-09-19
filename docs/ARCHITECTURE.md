@@ -6,7 +6,7 @@ estimation run in Rust. The only routine network request is the public models.de
 catalog refresh at application startup, after the window is available.
 
 ```text
-Codex desktop-app or CLI JSONL
+Codex, Claude, OMP, Copilot, or Kiro JSONL
               │
               ▼
   Rust discovery → safe collector → parser
@@ -35,7 +35,7 @@ The selected home determines the integration mode. A recognized desktop-app root
 
 ## Collection and parsing
 
-Desktop and CLI records use the same collector, parser, storage, and estimator pipeline. The collector traverses only real directories, tracks canonical directories, skips recursive links, preserves byte-offset/parser-state checkpoints, and reports unreadable files or partial scans as diagnostics and failed refresh status. Spaces, Unicode, parentheses, and platform path separators are handled through `Path` APIs.
+Each supported harness uses the same collector, parser, storage, and estimator pipeline. The collector enters only adapter-specific session roots, tracks canonical directories, skips recursive links, preserves byte-offset/parser-state checkpoints, and reports unreadable files or partial scans as diagnostics and failed refresh status. Spaces, Unicode, parentheses, and platform path separators are handled through `Path` APIs. Claude profiles are discovered below `~/.claude-profiles`; other harnesses use their documented local session roots. Arbitrary JSONL below a configuration root is never imported.
 
 `parser.rs` reads newline-terminated JSONL records, tolerates a partial final line, converts cumulative per-turn token updates into deltas, extracts weekly quota observations, and tracks `thread_settings_applied` service-tier records in chronological per-rollout/session state. Only `priority` and `fast` are explicit Fast evidence; `default` is Standard and missing/unrecognized tiers remain Unknown. It emits fingerprints and normalized model/speed data rather than raw content. No timing, TPS, current config, provider, or authentication heuristic participates in speed classification.
 
@@ -55,7 +55,8 @@ reconciliation at a time, so a large JSONL tree cannot freeze the application wi
 
 `storage.rs` owns the SQLite schema, WAL, foreign keys, owner-restricted files, migrations, weekly-window rebuilding, measurements, estimates, settings, diagnostics, and DTO query projections. The production database is `nerftrack.db` under the platform-native per-user application-data directory, independent of the process working directory.
 
-The database stores accounts, source checkpoints, parsed usage events, normalized `speed_mode`,
+The database stores accounts, source checkpoints, parsed usage events, normalized profile, harness,
+provider, cache-write and reported-cost fields, normalized `speed_mode`,
 `speed_source`, and `fast_multiplier` evidence, quota snapshots, weekly windows, measurements,
 estimates, annotations, settings, diagnostics, and app-run boundaries. It does not store prompts,
 raw account identifiers, or raw JSONL lines. `estimator.rs` keeps invalid intervals pending or
@@ -64,9 +65,9 @@ rejected rather than fabricating zero values.
 ## Pricing refresh and historical repricing
 
 `pricing.rs` fetches and validates models.dev's public JSON catalog with a bounded timeout and
-payload size, using ETags when available. NerfTrack selects only token-priced entries from the
-direct OpenAI provider, stores the last valid payload and digest locally, and falls back to the
-embedded catalog if the network is unavailable. Manual overrides are checked first.
+payload size, using ETags when available. NerfTrack selects token-priced entries by direct
+provider and model ID, stores the last valid payload and digest locally, and falls back to the
+embedded OpenAI catalog if the network is unavailable. Manual overrides are checked first.
 
 When the catalog digest, estimator algorithm/reconstruction version, or installed-bundle marker
 changes, `storage.rs` updates the effective rates and explicit Fast multiplier on every stored

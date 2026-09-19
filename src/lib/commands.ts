@@ -4,6 +4,7 @@ import type {
   AppStatus,
   CurrentQuote,
   DiagnosticsSummary,
+  HarnessUsageResponse,
   HistoryResponse,
   Range,
   RedactedSelection,
@@ -12,6 +13,7 @@ import {
   defaultAdvancedSettings,
   demoAnnotations,
   demoDiagnostics,
+  demoHarnessUsage,
   demoQuote,
   demoSettings,
   demoStatus,
@@ -25,6 +27,15 @@ export const getCurrentStatus = () => invokeOr<AppStatus>('get_current_status', 
 
 export const getHistory = (range: Range) =>
   invokeOr<HistoryResponse>('get_history', getDemoHistory(range), { range });
+
+export const getHarnessHistory = (range: Range, profileId: string | null) =>
+  invokeOr<HistoryResponse>('get_harness_history', getDemoHistory(range), {
+    range,
+    profileId,
+  });
+
+export const getHarnessUsage = () =>
+  invokeOr<HarnessUsageResponse>('get_harness_usage', demoHarnessUsage);
 
 export const getAnnotations = () => invokeOr<Annotation[]>('get_annotations', demoAnnotations);
 

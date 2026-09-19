@@ -60,12 +60,17 @@ impl SpeedSource {
 
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
+    pub profile_id: String,
+    pub harness: String,
+    pub provider: String,
     pub timestamp_ms: i64,
     pub model: String,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    pub cache_write_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
+    pub reported_cost_usd: Option<f64>,
     pub request_id: Option<String>,
     pub turn_id: Option<String>,
     pub session_id: Option<String>,
@@ -88,12 +93,17 @@ pub struct UsageEvent {
 impl Default for UsageEvent {
     fn default() -> Self {
         Self {
+            profile_id: "codex-default".into(),
+            harness: "codex".into(),
+            provider: "openai".into(),
             timestamp_ms: 0,
             model: String::new(),
             input_tokens: 0,
             cached_input_tokens: 0,
+            cache_write_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
+            reported_cost_usd: None,
             request_id: None,
             turn_id: None,
             session_id: None,
@@ -380,8 +390,11 @@ fn opaque_identifier(value: &str) -> String {
 }
 
 fn timestamp_ms(value: &Value) -> i64 {
-    if let Some(number) =
-        nested(value, &[&["timestamp_ms"], &["timestamp"], &["created_at"]]).and_then(Value::as_i64)
+    if let Some(number) = nested(
+        value,
+        &[&["timestamp_ms"], &["timestamp"], &["created_at"], &["ts"]],
+    )
+    .and_then(Value::as_i64)
     {
         return if number < 10_000_000_000 {
             number * 1000
@@ -389,8 +402,17 @@ fn timestamp_ms(value: &Value) -> i64 {
             number
         };
     }
-    if let Some(timestamp) =
-        nested(value, &[&["timestamp"], &["created_at"]]).and_then(Value::as_str)
+    if let Some(timestamp) = nested(
+        value,
+        &[
+            &["timestamp"],
+            &["created_at"],
+            &["updatedAt"],
+            &["startTime"],
+            &["ts"],
+        ],
+    )
+    .and_then(Value::as_str)
     {
         if let Ok(parsed) = timestamp.parse::<i64>() {
             return if parsed < 10_000_000_000 {
@@ -632,12 +654,17 @@ pub fn parse_jsonl_line_with_state(
     let fast_multiplier = fast_multiplier_for_model(&model, speed_mode);
     let long_context = bool_at(&value, &[&["long_context"], &["payload", "long_context"]]);
     Ok(Some(UsageEvent {
+        profile_id: "codex-default".into(),
+        harness: "codex".into(),
+        provider: provider.clone().unwrap_or_else(|| "openai".into()),
         timestamp_ms: timestamp_ms(&value),
         model,
         input_tokens,
         cached_input_tokens,
+        cache_write_tokens: token_at(usage, &["cache_write_input_tokens", "cache_write_tokens"]),
         output_tokens,
         reasoning_tokens,
+        reported_cost_usd: None,
         request_id: string_at(
             &value,
             &[
@@ -679,9 +706,219 @@ pub fn parse_jsonl_line_with_state(
     }))
 }
 
+fn token_at(value: &Value, names: &[&str]) -> u64 {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_u64))
+        .unwrap_or_default()
+}
+
+fn provider_for_model(model: &str, explicit: Option<String>) -> String {
+    if let Some(provider) = explicit.filter(|provider| !provider.trim().is_empty()) {
+        return provider.to_ascii_lowercase();
+    }
+    let model = model.to_ascii_lowercase();
+    if model.starts_with("claude") {
+        "anthropic".into()
+    } else if model.starts_with("gpt") || model.starts_with('o') {
+        "openai".into()
+    } else if model.starts_with("gemini") {
+        "google".into()
+    } else if model.starts_with("glm") {
+        "zhipuai".into()
+    } else {
+        "unknown".into()
+    }
+}
+
+struct ProfileEventInput {
+    provider: String,
+    timestamp_ms: i64,
+    model: String,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    cache_write_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: u64,
+    reported_cost_usd: Option<f64>,
+    request_id: Option<String>,
+}
+
+fn profile_event(profile_id: &str, harness: &str, input: ProfileEventInput) -> Option<UsageEvent> {
+    if input.timestamp_ms <= 0
+        || input.model.trim().is_empty()
+        || (input.input_tokens == 0
+            && input.cached_input_tokens == 0
+            && input.cache_write_tokens == 0
+            && input.output_tokens == 0
+            && input.reasoning_tokens == 0
+            && input.reported_cost_usd.is_none())
+    {
+        return None;
+    }
+    Some(UsageEvent {
+        profile_id: profile_id.into(),
+        harness: harness.into(),
+        provider: input.provider,
+        timestamp_ms: input.timestamp_ms,
+        model: input.model,
+        input_tokens: input.input_tokens,
+        cached_input_tokens: input.cached_input_tokens,
+        cache_write_tokens: input.cache_write_tokens,
+        output_tokens: input.output_tokens,
+        reasoning_tokens: input.reasoning_tokens,
+        reported_cost_usd: input.reported_cost_usd,
+        request_id: input.request_id,
+        ..UsageEvent::default()
+    })
+}
+
+pub fn parse_profile_jsonl_line(
+    profile_id: &str,
+    harness: &str,
+    line: &str,
+) -> Result<Vec<UsageEvent>, String> {
+    let value: Value = serde_json::from_str(line).map_err(|_| "invalid JSON record".to_string())?;
+    let timestamp_ms = timestamp_ms(&value);
+    let request_id = string_at(&value, &[&["id"], &["uuid"], &["event_id"]]);
+    match harness {
+        "claude" => {
+            let Some(usage) = nested(&value, &[&["message", "usage"]]) else {
+                return Ok(Vec::new());
+            };
+            let Some(model) = string_at(&value, &[&["message", "model"]]) else {
+                return Ok(Vec::new());
+            };
+            let cache_write_tokens = token_at(usage, &["cache_creation_input_tokens"]);
+            Ok(profile_event(
+                profile_id,
+                harness,
+                ProfileEventInput {
+                    provider: "anthropic".into(),
+                    timestamp_ms,
+                    model,
+                    input_tokens: token_at(usage, &["input_tokens"]),
+                    cached_input_tokens: token_at(usage, &["cache_read_input_tokens"]),
+                    cache_write_tokens,
+                    output_tokens: token_at(usage, &["output_tokens"]),
+                    reasoning_tokens: nested(
+                        usage,
+                        &[&["output_tokens_details", "thinking_tokens"]],
+                    )
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                    reported_cost_usd: None,
+                    request_id,
+                },
+            )
+            .into_iter()
+            .collect())
+        }
+        "omp" => {
+            let Some(usage) = nested(&value, &[&["message", "usage"]]) else {
+                return Ok(Vec::new());
+            };
+            let Some(model) = string_at(&value, &[&["message", "model"], &["model"]]) else {
+                return Ok(Vec::new());
+            };
+            let reported_cost_usd = nested(usage, &[&["cost", "total"]])
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0);
+            let provider = provider_for_model(
+                &model,
+                string_at(&value, &[&["message", "provider"], &["provider"]]),
+            );
+            Ok(profile_event(
+                profile_id,
+                harness,
+                ProfileEventInput {
+                    provider,
+                    timestamp_ms,
+                    model,
+                    input_tokens: token_at(usage, &["input"]),
+                    cached_input_tokens: token_at(usage, &["cacheRead"]),
+                    cache_write_tokens: token_at(usage, &["cacheWrite"]),
+                    output_tokens: token_at(usage, &["output"]),
+                    reasoning_tokens: token_at(usage, &["reasoningTokens"]),
+                    reported_cost_usd,
+                    request_id,
+                },
+            )
+            .into_iter()
+            .collect())
+        }
+        "kiro" => {
+            let Some(model) = string_at(&value, &[&["model"]]) else {
+                return Ok(Vec::new());
+            };
+            let reported_cost_usd = value
+                .get("cost")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0);
+            Ok(profile_event(
+                profile_id,
+                harness,
+                ProfileEventInput {
+                    provider: provider_for_model(&model, string_at(&value, &[&["provider"]])),
+                    timestamp_ms,
+                    model,
+                    input_tokens: token_at(&value, &["input"]),
+                    cached_input_tokens: token_at(&value, &["cache_read"]),
+                    cache_write_tokens: token_at(&value, &["cache_create"]),
+                    output_tokens: token_at(&value, &["output"]),
+                    reasoning_tokens: 0,
+                    reported_cost_usd,
+                    request_id,
+                },
+            )
+            .into_iter()
+            .collect())
+        }
+        "copilot" => {
+            let Some(metrics) =
+                nested(&value, &[&["data", "modelMetrics"]]).and_then(Value::as_object)
+            else {
+                return Ok(Vec::new());
+            };
+            Ok(metrics
+                .iter()
+                .filter_map(|(model, metric)| {
+                    let usage = metric.get("usage")?;
+                    let model = model.split(':').next().unwrap_or(model).to_string();
+                    profile_event(
+                        profile_id,
+                        harness,
+                        ProfileEventInput {
+                            provider: provider_for_model(&model, None),
+                            timestamp_ms,
+                            model,
+                            input_tokens: token_at(usage, &["inputTokens"]),
+                            cached_input_tokens: token_at(usage, &["cacheReadTokens"]),
+                            cache_write_tokens: token_at(usage, &["cacheWriteTokens"]),
+                            output_tokens: token_at(usage, &["outputTokens"]),
+                            reasoning_tokens: token_at(usage, &["reasoningTokens"]),
+                            reported_cost_usd: nested(metric, &[&["requests", "cost"]])
+                                .and_then(Value::as_f64)
+                                .filter(|value| value.is_finite() && *value >= 0.0),
+                            request_id: request_id.clone(),
+                        },
+                    )
+                })
+                .collect())
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 pub fn event_fingerprint(event: &UsageEvent) -> String {
     let mut digest = Sha256::new();
     digest.update(b"nerftrack-event:");
+    digest.update(event.profile_id.as_bytes());
+    digest.update([0]);
+    digest.update(event.harness.as_bytes());
+    digest.update([0]);
+    digest.update(event.provider.as_bytes());
+    digest.update([0]);
     digest.update(event.request_id.as_deref().unwrap_or("").as_bytes());
     digest.update([0]);
     digest.update(event.turn_id.as_deref().unwrap_or("").as_bytes());
@@ -697,8 +934,10 @@ pub fn event_fingerprint(event: &UsageEvent) -> String {
     );
     digest.update(event.input_tokens.to_le_bytes());
     digest.update(event.cached_input_tokens.to_le_bytes());
+    digest.update(event.cache_write_tokens.to_le_bytes());
     digest.update(event.output_tokens.to_le_bytes());
     digest.update(event.reasoning_tokens.to_le_bytes());
+    digest.update(event.reported_cost_usd.unwrap_or_default().to_le_bytes());
     digest.update(event.quota_used_percent.unwrap_or_default().to_le_bytes());
     digest.update(event.quota_reset_at_ms.unwrap_or_default().to_le_bytes());
     digest.update(
@@ -1081,5 +1320,41 @@ mod tests {
         assert_eq!(session_one.speed_mode, SpeedMode::Fast);
         assert_eq!(session_two.speed_mode, SpeedMode::Unknown);
         assert_eq!(session_two.fast_multiplier, 1.0);
+    }
+
+    #[test]
+    fn profile_adapters_keep_cache_write_and_profile_identity() {
+        let claude = parse_profile_jsonl_line(
+            "claude-work",
+            "claude",
+            r#"{"uuid":"c1","timestamp":"2026-09-20T00:00:00Z","message":{"model":"claude-sonnet-4","usage":{"input_tokens":10,"cache_read_input_tokens":2,"cache_creation_input_tokens":3,"output_tokens":4}}}"#,
+        )
+        .expect("claude record");
+        let omp = parse_profile_jsonl_line(
+            "omp-default",
+            "omp",
+            r#"{"id":"o1","timestamp":"2026-09-20T00:00:01Z","message":{"model":"gpt-5.6-luna","usage":{"input":11,"cacheRead":2,"cacheWrite":3,"output":4,"cost":{"total":0.5}}}}"#,
+        )
+        .expect("omp record");
+        let copilot = parse_profile_jsonl_line(
+            "copilot-default",
+            "copilot",
+            r#"{"id":"p1","timestamp":"2026-09-20T00:00:02Z","data":{"modelMetrics":{"gpt-5.6-terra":{"usage":{"inputTokens":12,"cacheReadTokens":2,"cacheWriteTokens":3,"outputTokens":4,"reasoningTokens":1},"requests":{"cost":0.7}}}}}"#,
+        )
+        .expect("copilot record");
+        let kiro = parse_profile_jsonl_line(
+            "kiro-default",
+            "kiro",
+            r#"{"ts":"2026-09-20T00:00:03Z","provider":"openai","model":"gpt-5.6-luna","input":13,"cache_read":2,"cache_create":3,"output":4,"cost":0.8}"#,
+        )
+        .expect("kiro record");
+
+        assert_eq!(claude[0].profile_id, "claude-work");
+        assert_eq!(claude[0].provider, "anthropic");
+        assert_eq!(claude[0].cache_write_tokens, 3);
+        assert_eq!(omp[0].reported_cost_usd, Some(0.5));
+        assert_eq!(copilot[0].cache_write_tokens, 3);
+        assert!(kiro[0].timestamp_ms > 0);
+        assert_ne!(event_fingerprint(&claude[0]), event_fingerprint(&omp[0]));
     }
 }

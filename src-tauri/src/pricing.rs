@@ -27,28 +27,38 @@ pub struct RemotePriceTier {
 pub struct RemotePrice {
     pub input: f64,
     pub cached_input: f64,
+    pub cache_write: f64,
     pub output: f64,
     pub long_context_tiers: Vec<RemotePriceTier>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct PricingCatalog {
-    pub models: HashMap<String, RemotePrice>,
+    pub models: HashMap<(String, String), RemotePrice>,
     pub digest: Option<String>,
 }
 
 impl PricingCatalog {
-    pub fn find(&self, model: &str) -> Option<RemotePrice> {
+    pub fn find(&self, provider: &str, model: &str) -> Option<RemotePrice> {
+        let provider = provider.trim().to_ascii_lowercase();
         let normalized = normalize_model_id(model);
-        let canonical = canonical_api_model_id(&normalized);
+        let canonical = if provider == "openai" {
+            canonical_api_model_id(&normalized)
+        } else {
+            normalized.clone()
+        };
         self.models
-            .get(&canonical)
+            .get(&(provider.clone(), canonical))
             .cloned()
-            .or_else(|| self.models.get(&normalized).cloned())
+            .or_else(|| {
+                self.models
+                    .get(&(provider.clone(), normalized.clone()))
+                    .cloned()
+            })
             .or_else(|| {
                 normalized
                     .strip_prefix("openai-")
-                    .and_then(|unprefixed| self.models.get(unprefixed).cloned())
+                    .and_then(|unprefixed| self.models.get(&(provider, unprefixed.into())).cloned())
             })
     }
 }
@@ -85,38 +95,43 @@ pub fn canonical_api_model_id(model: &str) -> String {
 pub fn parse_catalog(json: &str, digest: Option<String>) -> Result<PricingCatalog, String> {
     let root: Value = serde_json::from_str(json)
         .map_err(|error| format!("models.dev returned invalid JSON: {error}"))?;
-    let openai_models = root
-        .get("openai")
-        .and_then(|provider| provider.get("models"))
-        .and_then(Value::as_object)
-        .ok_or_else(|| "models.dev catalog has no openai.models section".to_string())?;
-
     let mut models = HashMap::new();
-    for (model_key, model_value) in openai_models {
-        let Some(cost) = model_value.get("cost") else {
+    let providers = root
+        .as_object()
+        .ok_or_else(|| "models.dev catalog is not an object".to_string())?;
+    for (provider_id, provider) in providers {
+        let Some(provider_models) = provider.get("models").and_then(Value::as_object) else {
             continue;
         };
-        let Some(input) = non_negative_number(cost.get("input")) else {
-            continue;
-        };
-        let Some(output) = non_negative_number(cost.get("output")) else {
-            continue;
-        };
-        let Some(cached_input) = optional_non_negative_number(cost.get("cache_read")) else {
-            continue;
-        };
-        let price = RemotePrice {
-            input,
-            cached_input,
-            output,
-            long_context_tiers: parse_long_context_tiers(cost),
-        };
-
-        insert_model_aliases(&mut models, model_key, model_value, price);
+        for (model_key, model_value) in provider_models {
+            let Some(cost) = model_value.get("cost") else {
+                continue;
+            };
+            let Some(input) = non_negative_number(cost.get("input")) else {
+                continue;
+            };
+            let Some(output) = non_negative_number(cost.get("output")) else {
+                continue;
+            };
+            let Some(cached_input) = optional_non_negative_number(cost.get("cache_read")) else {
+                continue;
+            };
+            let Some(cache_write) = optional_non_negative_number(cost.get("cache_write")) else {
+                continue;
+            };
+            let price = RemotePrice {
+                input,
+                cached_input,
+                cache_write,
+                output,
+                long_context_tiers: parse_long_context_tiers(cost),
+            };
+            insert_model_aliases(&mut models, provider_id, model_key, model_value, price);
+        }
     }
 
     if models.is_empty() {
-        return Err("models.dev openai.models contains no token-priced models".to_string());
+        return Err("models.dev catalog contains no token-priced models".to_string());
     }
 
     Ok(PricingCatalog { models, digest })
@@ -179,7 +194,8 @@ pub fn fetch_models_dev(etag: Option<&str>) -> Result<FetchOutcome, String> {
 }
 
 fn insert_model_aliases(
-    models: &mut HashMap<String, RemotePrice>,
+    models: &mut HashMap<(String, String), RemotePrice>,
+    provider: &str,
     model_key: &str,
     model_value: &Value,
     price: RemotePrice,
@@ -193,9 +209,15 @@ fn insert_model_aliases(
         if normalized.is_empty() {
             continue;
         }
-        models.insert(normalized.clone(), price.clone());
+        models.insert(
+            (provider.to_ascii_lowercase(), normalized.clone()),
+            price.clone(),
+        );
         if let Some(unprefixed) = normalized.strip_prefix("openai-") {
-            models.insert(unprefixed.to_string(), price.clone());
+            models.insert(
+                (provider.to_ascii_lowercase(), unprefixed.to_string()),
+                price.clone(),
+            );
         }
     }
 }
@@ -286,9 +308,12 @@ mod tests {
         .expect("catalog should parse");
 
         assert_eq!(catalog.digest.as_deref(), Some("digest"));
-        assert_eq!(catalog.find("gpt-test").expect("model").input, 1.0);
-        assert!(catalog.find("claude-test").is_none());
-        assert!(catalog.find("image-test").is_none());
+        assert_eq!(
+            catalog.find("openai", "gpt-test").expect("model").input,
+            1.0
+        );
+        assert!(catalog.find("anthropic", "claude-test").is_some());
+        assert!(catalog.find("openai", "image-test").is_none());
     }
 
     #[test]
@@ -311,11 +336,28 @@ mod tests {
             None,
         )
         .expect("catalog should parse");
-        let price = catalog.find("gpt-tier").expect("model");
+        let price = catalog.find("openai", "gpt-tier").expect("model");
         assert_eq!(price.long_context_tiers.len(), 2);
         assert_eq!(price.long_context_tiers[0].threshold_tokens, 272_000);
         assert_eq!(price.long_context_tiers[0].output, 45.0);
         assert_eq!(price.long_context_tiers[1].threshold_tokens, 1_000_000);
+    }
+
+    #[test]
+    fn keeps_prices_separate_by_provider_and_includes_cache_write() {
+        let catalog = parse_catalog(
+            r#"{"anthropic":{"models":{"claude-test":{"cost":{"input":3,"cache_read":0.3,"cache_write":3.75,"output":15}}}},"openai":{"models":{"claude-test":{"cost":{"input":1,"output":2}}}}}"#,
+            None,
+        )
+        .expect("catalog should parse");
+        assert_eq!(
+            catalog
+                .find("anthropic", "claude-test")
+                .unwrap()
+                .cache_write,
+            3.75
+        );
+        assert_eq!(catalog.find("openai", "claude-test").unwrap().input, 1.0);
     }
 
     #[test]
@@ -335,7 +377,9 @@ mod tests {
             None,
         )
         .expect("catalog should parse");
-        let price = catalog.find(CODEX_AUTO_REVIEW_MODEL_ID).expect("model");
+        let price = catalog
+            .find("openai", CODEX_AUTO_REVIEW_MODEL_ID)
+            .expect("model");
         assert_eq!(price.input, 0.2);
         assert_eq!(price.cached_input, 0.02);
         assert_eq!(price.output, 1.2);

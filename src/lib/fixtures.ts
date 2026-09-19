@@ -5,6 +5,7 @@ import type {
   AppStatus,
   CurrentQuote,
   DiagnosticsSummary,
+  HarnessUsageResponse,
   HistoryResponse,
   Range,
 } from '../domain';
@@ -111,6 +112,53 @@ export const demoDiagnostics: DiagnosticsSummary = {
   privacy: 'Prompts, account identifiers, and full local paths are never stored or returned.',
 };
 
+export const demoHarnessUsage: HarnessUsageResponse = {
+  total: {
+    profileId: 'all',
+    harness: 'all',
+    label: 'All Harness',
+    available: true,
+    eventCount: 846,
+    pricedEventCount: 812,
+    inputTokens: 9_800_000,
+    cachedInputTokens: 3_100_000,
+    cacheWriteTokens: 400_000,
+    outputTokens: 1_200_000,
+    estimatedCostUsd: 138.6,
+    reportedCostUsd: 41.2,
+  },
+  summaries: [
+    {
+      profileId: 'codex-default',
+      harness: 'codex',
+      label: 'Codex',
+      available: true,
+      eventCount: 440,
+      pricedEventCount: 440,
+      inputTokens: 6_100_000,
+      cachedInputTokens: 2_400_000,
+      cacheWriteTokens: 100_000,
+      outputTokens: 720_000,
+      estimatedCostUsd: 102.4,
+      reportedCostUsd: null,
+    },
+    {
+      profileId: 'claude-work',
+      harness: 'claude',
+      label: 'Claude · work',
+      available: true,
+      eventCount: 406,
+      pricedEventCount: 372,
+      inputTokens: 3_700_000,
+      cachedInputTokens: 700_000,
+      cacheWriteTokens: 300_000,
+      outputTokens: 480_000,
+      estimatedCostUsd: 36.2,
+      reportedCostUsd: 41.2,
+    },
+  ],
+};
+
 export const defaultAdvancedSettings: AdvancedSettings = {
   refreshIntervalSeconds: 10,
   reconciliationIntervalHours: 1,
@@ -126,7 +174,6 @@ export const demoSettings: AppSettings = {
   localOnly: true,
   telemetry: false,
   autoUpdater: false,
-  starterPageSeen: true,
   installationMarker: '',
   customPricing: [],
 };

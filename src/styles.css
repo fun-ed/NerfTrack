@@ -1218,6 +1218,159 @@ p {
 .metric-card:has(.usage-ring) .metric-icon {
   opacity: 0;
 }
+.chart-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.chart-scope > span {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.chart-scope strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  color: #d9fce1;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(45, 159, 82, 0.16);
+  border: 1px solid rgba(92, 240, 122, 0.28);
+  border-radius: 999px;
+}
+.chart-scope i {
+  width: 7px;
+  height: 7px;
+  background: var(--green);
+  border-radius: 50%;
+}
+.chart-scope small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+.harness-usage {
+  margin-top: 24px;
+  padding: 22px;
+}
+.setup-harness-usage {
+  margin-top: 30px;
+}
+.setup-harness-usage .panel-heading > div {
+  display: grid;
+  gap: 4px;
+}
+.setup-harness-usage .panel-heading > div > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.setup-codex-heading {
+  display: grid;
+  gap: 5px;
+  margin-top: 28px;
+}
+.setup-codex-heading h2 {
+  color: #edf0f2;
+  font-size: 20px;
+  font-weight: 560;
+}
+.setup-codex-heading p {
+  color: var(--muted);
+  font-size: 14px;
+}
+.harness-usage-heading {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.harness-usage-heading > div {
+  display: grid;
+  gap: 5px;
+}
+.harness-usage-heading > div > span,
+.harness-usage-heading label > span,
+.harness-row span,
+.harness-row div > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.harness-usage-heading label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+.harness-usage-heading select {
+  min-width: 180px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.harness-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+.harness-summary-grid > div {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  background: rgba(20, 28, 35, 0.7);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+.harness-summary-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.harness-summary-grid strong {
+  color: #f0f2f4;
+  font-size: 19px;
+  font-weight: 560;
+}
+.harness-rows {
+  display: grid;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.harness-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 135px 120px;
+  align-items: center;
+  gap: 14px;
+  min-height: 59px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.harness-row div {
+  display: grid;
+  gap: 4px;
+}
+.harness-row strong {
+  color: var(--text);
+  font-size: 14px;
+}
+@media (max-width: 720px) {
+  .harness-usage-heading {
+    display: grid;
+  }
+  .harness-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .harness-row {
+    grid-template-columns: minmax(0, 1fr) 100px;
+  }
+  .harness-row > span:last-child {
+    display: none;
+  }
+}
 .app-footer {
   display: flex;
   align-items: center;

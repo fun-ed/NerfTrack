@@ -20,7 +20,8 @@ use tauri::State;
 
 use crate::models::{
     AccountState, AppSettings, AppStatus, AppStatusState, ConnectionQuality, DataQuality,
-    DiscoveryStatus, IntegrationMode, Range, RedactedSelection,
+    DiscoveryStatus, HarnessUsageResponse, HarnessUsageSummary, IntegrationMode, Range,
+    RedactedSelection,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -228,8 +229,7 @@ impl AppState {
     fn sync_installation_state(&self) -> Result<(), String> {
         let current_marker = installation_marker()?;
         let pending_update = storage::data_directory()?.join(".pending-update");
-        let update_was_requested = pending_update.is_file();
-        if update_was_requested {
+        if pending_update.is_file() {
             let _ = fs::remove_file(&pending_update);
         }
         let mut database = self
@@ -238,13 +238,7 @@ impl AppState {
             .map_err(|_| "database writer is unavailable".to_string())?;
         let mut settings = database.load_settings()?;
         let marker_changed = settings.installation_marker != current_marker;
-        let reset_starter_page = !update_was_requested
-            && settings.should_reset_starter_page_for_reinstall(&current_marker);
-
-        if reset_starter_page {
-            settings.starter_page_seen = false;
-        }
-        if marker_changed || reset_starter_page {
+        if marker_changed {
             settings.installation_marker = current_marker;
             database.save_settings(&settings)?;
         }
@@ -256,25 +250,41 @@ impl AppState {
         home_override: Option<&Path>,
     ) -> Result<(), String> {
         let (home, _) = discovery::discover_codex_home(home_override);
-        let Some(home) = home else {
-            return Ok(());
-        };
+        let profiles = collector::discover_harness_profiles(home.as_deref());
         let previous = database
             .lock()
             .map_err(|_| "database reader is unavailable".to_string())?
             .load_checkpoint_states()?;
-        let collection = collector::scan_codex_home_with_state(&home, &previous)?;
+        let collections = profiles
+            .into_iter()
+            .filter(|profile| profile.available)
+            .map(|profile| {
+                let collection = if profile.harness == "codex" {
+                    collector::scan_codex_home_with_state(&profile.root, &previous)?
+                } else {
+                    collector::scan_profile_jsonl(
+                        &profile.root,
+                        &profile.id,
+                        &profile.harness,
+                        &previous,
+                    )?
+                };
+                Ok::<_, String>(collection)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let interrupted = collections
+            .iter()
+            .any(|collection| !collection.interrupted_sources.is_empty());
         let mut database = database
             .lock()
             .map_err(|_| "database writer is unavailable".to_string())?;
-        database.persist_collection::<()>(&collection, None, None)?;
-        // Symlinks are deliberately skipped by the collector to avoid recursive
-        // traversal. They are recorded in diagnostics, but do not make the scan
-        // incomplete or suppress the live chart heartbeat.
-        if !collection.interrupted_sources.is_empty() {
-            return Err("Codex data scan completed only partially; see local diagnostics".into());
+        for collection in &collections {
+            database.persist_collection::<()>(collection, None, None)?;
         }
         database.record_chart_heartbeat()?;
+        if interrupted {
+            return Err("Local data scan completed only partially; see local diagnostics".into());
+        }
         Ok(())
     }
 
@@ -540,6 +550,101 @@ async fn get_history(
         .lock()
         .map_err(|_| "database reader is unavailable".to_string())?
         .history(parse_range(&range)?)
+}
+
+#[tauri::command]
+async fn get_harness_history(
+    state: State<'_, AppState>,
+    range: String,
+    profile_id: Option<String>,
+) -> Result<models::HistoryResponse, String> {
+    state.request_background_reconcile();
+    state
+        .database
+        .lock()
+        .map_err(|_| "database reader is unavailable".to_string())?
+        .harness_history(parse_range(&range)?, profile_id.as_deref())
+}
+
+#[tauri::command]
+async fn get_harness_usage(state: State<'_, AppState>) -> Result<HarnessUsageResponse, String> {
+    state.request_background_reconcile();
+    let home_override = state
+        .codex_home_override
+        .lock()
+        .map_err(|_| "discovery state is unavailable".to_string())?
+        .clone();
+    let (home, _) = discovery::discover_codex_home(home_override.as_deref());
+    let profiles = collector::discover_harness_profiles(home.as_deref());
+    let mut response = state
+        .database
+        .lock()
+        .map_err(|_| "database reader is unavailable".to_string())?
+        .harness_usage()?;
+    response.summaries.retain(|summary| {
+        collector::is_visible_harness_profile(&summary.harness, &summary.profile_id)
+    });
+    for profile in profiles {
+        if let Some(summary) = response
+            .summaries
+            .iter_mut()
+            .find(|summary| summary.profile_id == profile.id)
+        {
+            summary.label = profile.label;
+            summary.available = profile.available;
+            continue;
+        }
+        response.summaries.push(HarnessUsageSummary {
+            profile_id: profile.id,
+            harness: profile.harness,
+            label: profile.label,
+            available: profile.available,
+            event_count: 0,
+            priced_event_count: 0,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_usd: None,
+            reported_cost_usd: None,
+        });
+    }
+    response
+        .summaries
+        .sort_by(|left, right| left.label.cmp(&right.label));
+    response.total = response.summaries.iter().fold(
+        HarnessUsageSummary {
+            profile_id: "all".into(),
+            harness: "all".into(),
+            label: "All Harness".into(),
+            available: true,
+            event_count: 0,
+            priced_event_count: 0,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_usd: None,
+            reported_cost_usd: None,
+        },
+        |mut total, item| {
+            total.event_count += item.event_count;
+            total.priced_event_count += item.priced_event_count;
+            total.input_tokens += item.input_tokens;
+            total.cached_input_tokens += item.cached_input_tokens;
+            total.cache_write_tokens += item.cache_write_tokens;
+            total.output_tokens += item.output_tokens;
+            if let Some(cost) = item.estimated_cost_usd {
+                total.estimated_cost_usd =
+                    Some(total.estimated_cost_usd.unwrap_or_default() + cost);
+            }
+            if let Some(cost) = item.reported_cost_usd {
+                total.reported_cost_usd = Some(total.reported_cost_usd.unwrap_or_default() + cost);
+            }
+            total
+        },
+    );
+    Ok(response)
 }
 
 #[tauri::command]
@@ -834,6 +939,8 @@ pub fn run() {
             get_current_quote,
             get_current_status,
             get_history,
+            get_harness_history,
+            get_harness_usage,
             get_annotations,
             reset_annotations,
             reset_all_data,

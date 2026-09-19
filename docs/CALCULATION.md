@@ -1,8 +1,8 @@
 # Token-based weekly API-equivalent estimator
 
-NerfTrack estimates what observed local Codex activity would cost through the OpenAI API. It does not read, infer, convert, or display Codex credits, and it is not a ChatGPT bill.
+NerfTrack estimates what observed local harness activity would cost through the matching public API. It does not read, infer, convert, or display subscription credits, and it is not a subscription bill.
 
-For each JSONL token event, NerfTrack prices uncached input, cached input, and output at USD-per-million-token rates. When the log exposes reasoning tokens, they are treated as an output detail—not an additional billed token count—and are used only if a total output count is absent. A positive cost delta is paired only with a positive weekly `used_percent` delta in the same account/limit/reset window:
+For each JSONL token event, NerfTrack prices uncached input, cached input, cache writes, and output at USD-per-million-token rates. When the log exposes reasoning tokens, they are treated as an output detail, not an additional billed token count, and are used only if a total output count is absent. Only Codex records with a weekly quota produce the weekly projection below.
 
 ```text
 cost_delta_usd = current_token_cost_usd - previous_token_cost_usd
@@ -42,10 +42,10 @@ Each history point shows the unsmoothed cumulative cost-per-usage estimate for t
 ## Pricing and overrides
 
 On every application launch, NerfTrack requests the public models.dev catalog at
-https://models.dev/api.json. It reads only the direct openai.models section, so a provider's
-OpenRouter resale price is not mistaken for the OpenAI API price. The catalog is downloaded and
-matched locally by model ID; NerfTrack does not send prompts, token counts, account identifiers,
-or usage events to models.dev.
+https://models.dev/api.json. It matches a model by its direct provider and model ID, so a relay
+price is not substituted for the provider selected by a local record. The catalog is downloaded
+and matched locally; NerfTrack does not send prompts, token counts, account identifiers, or usage
+events to models.dev.
 
 When a valid catalog is received, its complete JSON payload and SHA-256 digest are stored in the
 local database. A changed digest reprices every stored usage event and rebuilds measurements,
@@ -56,8 +56,8 @@ catalog, then the embedded fallback catalog, while preserving manual overrides.
 Pricing precedence is:
 
 1. A matching user override or alias.
-2. A token-priced model in the latest valid models.dev openai.models snapshot.
-3. The embedded OpenAI fallback catalog below.
+2. A token-priced model from the latest valid models.dev provider snapshot.
+3. The embedded OpenAI fallback catalog, when the record is an OpenAI model.
 
 Built-in fallback rates were verified on 2026-09-04 from OpenAI API model pages:
 
@@ -79,8 +79,8 @@ offline and is used for future records as well as records already stored.
 The embedded text fallback also covers the currently documented GPT-5.6/5.5/5.4/5.x, GPT-4.1,
 GPT-4o, o1, o3, o3-mini, and o4-mini text model IDs using the [official model catalog](https://developers.openai.com/api/docs/models/all),
 [model comparison](https://developers.openai.com/api/docs/models/compare), and [API pricing](https://openai.com/api/pricing/)
-rates verified on that date. Token logs do not identify audio/image modality tokens, cache writes,
-or tool-call units, so those non-text charges are intentionally unavailable rather than fabricated.
+rates verified on that date. Token logs do not identify audio/image modality tokens or tool-call
+units, so those non-text charges are intentionally unavailable rather than fabricated.
 The official OpenAI model catalog currently documents `gpt-6-astra` but does not publish
 API pricing for the screenshot's `gpt-6-astra-aeon` identifier; NerfTrack leaves that
 identifier pending until an official rate is available or a local override is supplied.
@@ -97,9 +97,9 @@ Only 10,080-minute weekly limits are used. Windows are separated by account and 
 
 Range changes are calculated only when both endpoints have medium or high confidence, the baseline lies inside the selected range, and it precedes the current estimate. Otherwise the comparison is unavailable rather than inferred from stale or low-coverage history.
 
-Schema migration 11 preserves raw usage events, quota observations, accounts, settings, user
+Schema migration 12 preserves raw usage events, quota observations, accounts, settings, user
 annotations, and checkpoints while adding normalized service-tier evidence and the Fast
-multiplier audit fields. The estimator algorithm version is incremented so existing derived
+multiplier audit fields plus profile, harness, provider, cache-write, and reported-cost fields. The estimator algorithm version is incremented so existing derived
 estimates are invalidated. On startup NerfTrack compares the pricing digest, estimator versions,
 and installed-bundle marker with the last completed rebuild. Only when one changes does it
 reparse every discoverable source JSONL rollout, apply explicit historical tier corrections,

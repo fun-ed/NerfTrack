@@ -11,17 +11,19 @@ import type {
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { Icon } from './components/Icons';
 import { HistoryView } from './components/HistoryView';
-import { MetricCard, UsageRing } from './components/MetricCard';
+import { HarnessUsagePanel } from './components/HarnessUsagePanel';
+import { MetricCard } from './components/MetricCard';
 import { SetupView } from './components/SetupView';
 import { SettingsView } from './components/SettingsView';
 import { SideNav } from './components/SideNav';
-import { StarterPage } from './components/StarterPage';
 import { UsageChart } from './components/UsageChart';
 import {
   getAnnotations,
   getCurrentQuote,
   getCurrentStatus,
   getDiagnosticsSummary,
+  getHarnessHistory,
+  getHarnessUsage,
   getHistory,
   getSettings,
   importAllData,
@@ -33,19 +35,18 @@ import {
   selectCodexHome,
   updateSettings,
 } from './lib/commands';
-import { demoQuote, demoStatus } from './lib/fixtures';
+import { demoHarnessUsage, demoQuote, demoStatus, getDemoHistory } from './lib/fixtures';
 import { GITHUB_REPOSITORY_URL, SHARE_GRAPH_DISCUSSION_URL } from './lib/config';
 import { getChartEstimate } from './lib/comparison';
 import {
   checkForUpdate,
   consumeUpdateFailure,
-  CURRENT_APP_VERSION,
   downloadUpdate,
   initialUpdateState,
   installUpdate,
   openExternalUrl,
 } from './lib/updater';
-import type { Annotation, DiagnosticsSummary, HistoryResponse } from './domain';
+import type { Annotation, DiagnosticsSummary, HarnessUsageResponse, HistoryResponse } from './domain';
 import type { UpdateCheckResult, UpdateState } from './domain';
 import {
   detectLocale,
@@ -102,61 +103,6 @@ function formatPercent(value: number | null, locale: Locale) {
       })}%`;
 }
 
-function hasStableEstimate(quote: CurrentQuote | null) {
-  return (
-    quote?.status === 'valid' && (quote.confidence === 'medium' || quote.confidence === 'high')
-  );
-}
-
-function formatCoverage(value: number | null | undefined, locale: Locale, t: Translate) {
-  if (value === null || value === undefined) return t('home.unknownCoverage');
-  return t('home.coverage', {
-    value: value.toLocaleString(locale, { maximumFractionDigits: 1 }),
-  });
-}
-
-function formatObservationCount(count: number, locale: Locale, t: Translate) {
-  return t(count === 1 ? 'home.validObservation' : 'home.validObservations', {
-    count: count.toLocaleString(locale),
-  });
-}
-
-function calibrationNote(quote: CurrentQuote | null, locale: Locale, t: Translate) {
-  if (!quote || quote.estimatedWeeklyValueUsd === null) {
-    return t('home.waitingForPair');
-  }
-  return t('home.earlyProjection', {
-    value: formatEstimatedUsd(quote.estimatedWeeklyValueUsd, locale, t),
-    observations: formatObservationCount(quote.validObservationCount, locale, t),
-    coverage: formatCoverage(quote.percentageCoverage, locale, t),
-  });
-}
-
-function formatReset(status: AppStatus, now: number, t: Translate) {
-  if (!status.resetAt) return t('home.pending');
-  const remaining = status.resetAt - now;
-  if (remaining <= 0) return t('home.resetObserved');
-  const minutes = Math.max(1, Math.floor(remaining / 60_000));
-  const days = Math.floor(minutes / 1_440);
-  const hours = Math.floor((minutes % 1_440) / 60);
-  const remainderMinutes = minutes % 60;
-  if (days > 0)
-    return `${days}${t('common.dayShort')} ${hours}${t('common.hourShort')} ${remainderMinutes}${t('common.minuteShort')}`;
-  if (hours > 0)
-    return `${hours}${t('common.hourShort')} ${remainderMinutes}${t('common.minuteShort')}`;
-  return `${remainderMinutes}${t('common.minuteShort')}`;
-}
-
-function formatResetDate(timestamp: number | null, locale: Locale, t: Translate) {
-  if (!timestamp) return t('home.awaitingWindow');
-  return new Date(timestamp).toLocaleString(locale, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
-
 function HeaderIcon() {
   return (
     <div className="hero-icon">
@@ -172,20 +118,6 @@ function useLiveNow() {
     return () => window.clearInterval(timer);
   }, []);
   return now;
-}
-
-function ResetMetric({ status }: { status: AppStatus }) {
-  const now = useLiveNow();
-  const { locale, t } = useI18n();
-  return (
-    <MetricCard
-      icon="clock"
-      iconTone="blue"
-      label={t('home.resetsIn')}
-      value={formatReset(status, now, t)}
-      detail={formatResetDate(status.resetAt, locale, t)}
-    />
-  );
 }
 
 function LiveRefreshStatus() {
@@ -262,11 +194,14 @@ export function HomeView({
   quote,
   history,
   annotations,
+  harnessUsage,
+  graphScope = 'all',
   range,
   reducedMotion,
   isRefreshing,
   onRefresh,
   onRangeChange,
+  onGraphScopeChange = () => {},
   onResetAnnotations,
   onShareGraph,
 }: {
@@ -274,11 +209,14 @@ export function HomeView({
   quote: CurrentQuote | null;
   history: HistoryResponse;
   annotations: Annotation[];
+  harnessUsage: HarnessUsageResponse;
+  graphScope?: string;
   range: Range;
   reducedMotion: boolean;
   isRefreshing: boolean;
   onRefresh: () => void;
   onRangeChange: (range: Range) => void;
+  onGraphScopeChange?: (scope: string) => void;
   onResetAnnotations: () => void;
   onShareGraph?: () => Promise<void>;
 }) {
@@ -291,8 +229,8 @@ export function HomeView({
   const [shareError, setShareError] = useState<string | null>(null);
   const displayValue = scrubbed
     ? getChartEstimate(scrubbed.point)
-    : (quote?.estimatedWeeklyValueUsd ?? null);
-  const stableEstimate = hasStableEstimate(quote) && !scrubbed;
+    : (history.statistics.currentEstimatedWeeklyValueUsd ?? null);
+  const stableEstimate = displayValue !== null;
   const comparisonValue =
     stableEstimate || scrubbed
       ? scrubbed?.anchor
@@ -332,7 +270,23 @@ export function HomeView({
               }),
             })
           : t(rangeLabelKeys[range]);
-  const isEmpty = displayValue === null || !quote || quote.status === 'empty';
+  const isEmpty = displayValue === null;
+  const selectedScope =
+    graphScope === 'all'
+      ? harnessUsage.total
+      : harnessUsage.summaries.find((summary) => summary.profileId === graphScope) ??
+        harnessUsage.total;
+  const graphTitle =
+    graphScope === 'all'
+      ? t('home.allHarnessUsage')
+      : t('home.profileUsage', { label: selectedScope.label });
+  const graphSubtitle = t('home.cumulativeCost', { label: selectedScope.label });
+  const selectedTokenCount =
+    selectedScope.inputTokens +
+    selectedScope.cachedInputTokens +
+    selectedScope.cacheWriteTokens +
+    selectedScope.outputTokens;
+  const unpricedEventCount = selectedScope.eventCount - selectedScope.pricedEventCount;
   const selectRange = (nextRange: Range) => {
     setScrubbed(null);
     onRangeChange(nextRange);
@@ -352,13 +306,13 @@ export function HomeView({
   };
 
   return (
-    <section className="home-page page-shell">
+    <section className="home-page page-shell" data-quote-status={quote?.status ?? 'empty'}>
       <header className="hero-heading">
         <div className="hero-title-wrap">
           <HeaderIcon />
           <div>
-            <h1>{t('home.title')}</h1>
-            <p>{stableEstimate ? t('home.stableDescription') : t('home.calibratingDescription')}</p>
+            <h1>{graphTitle}</h1>
+            <p>{graphSubtitle}</p>
           </div>
         </div>
         <div className="hero-controls">
@@ -386,9 +340,7 @@ export function HomeView({
       </header>
       <div className="quote-heading">
         <strong className={isEmpty || (!stableEstimate && !scrubbed) ? 'empty-value' : ''}>
-          {stableEstimate || scrubbed
-            ? formatEstimatedUsd(displayValue, locale, t)
-            : t('home.calibrating')}
+          {stableEstimate || scrubbed ? formatEstimatedUsd(displayValue, locale, t) : t('home.notAvailable')}
         </strong>
         {!isEmpty && (stableEstimate || scrubbed) && (
           <p className={displayChange !== null && displayChange < 0 ? 'negative' : 'positive'}>
@@ -398,17 +350,28 @@ export function HomeView({
           </p>
         )}
         {(isEmpty || (!stableEstimate && !scrubbed)) && (
-          <p className="muted-state">{calibrationNote(quote, locale, t)}</p>
+          <p className="muted-state">{t('home.noPricedUsage')}</p>
         )}
       </div>
       <div className="chart-panel">
+        <div className="chart-scope" role="note">
+          <span>{t('home.lineGraph')}</span>
+          <strong>
+            <i aria-hidden="true" />
+            {selectedScope.label}
+          </strong>
+          <small>{graphSubtitle}</small>
+        </div>
         <UsageChart
           points={history.points}
-          annotations={annotations}
+          annotations={graphScope === 'codex-default' ? annotations : []}
           range={range}
           reducedMotion={reducedMotion}
           changeValueUsd={history.statistics.deltaValueUsd}
           baselineEstimatedWeeklyValueUsd={history.statistics.baselineEstimatedWeeklyValueUsd}
+          title={t('home.cumulativeApiCost')}
+          subtitle={graphSubtitle}
+          ariaLabel={`${selectedScope.label} cumulative API-equivalent cost chart`}
           onScrub={(point, anchor) => setScrubbed(point ? { point, anchor } : null)}
         />
         <div className="chart-actions">
@@ -432,57 +395,33 @@ export function HomeView({
         <MetricCard
           icon="chart"
           iconTone="green"
-          label={hasStableEstimate(quote) ? t('home.stableValue') : t('home.earlyValue')}
-          value={formatEstimatedUsd(quote?.estimatedWeeklyValueUsd ?? null, locale, t)}
-          detail={
-            hasStableEstimate(quote)
-              ? t('home.cumulativeEstimate')
-              : `${t(`home.confidence.${quote?.confidence ?? 'none'}`)} · ${formatCoverage(
-                  quote?.percentageCoverage,
-                  locale,
-                  t,
-                )}`
-          }
+          label={t('home.cumulativeApiCost')}
+          value={formatUsd(displayValue, locale, t)}
+          detail={selectedScope.label}
         />
         <MetricCard
           icon="chart"
           iconTone="lime"
-          label={t('home.weeklyUsed')}
-          value={
-            quote?.weeklyUsedPercent === null || quote?.weeklyUsedPercent === undefined
-              ? '—'
-              : `${Math.round(quote.weeklyUsedPercent)}%`
-          }
-          detail={t('home.ofAllowance')}
-        >
-          <UsageRing value={quote?.weeklyUsedPercent ?? null} />
-        </MetricCard>
-        <ResetMetric status={status} />
+          label={t('home.pricedEvents')}
+          value={selectedScope.pricedEventCount.toLocaleString(locale)}
+          detail={selectedScope.eventCount.toLocaleString(locale)}
+        />
         <MetricCard
           icon="activity"
           iconTone="purple"
-          label={t('home.observedTokenCost')}
-          value={formatUsd(quote?.observedCostUsd ?? null, locale, t)}
-          detail={t('home.thisWindow')}
+          label={t('home.reportedCost')}
+          value={formatUsd(selectedScope.reportedCostUsd, locale, t)}
+          detail={`${selectedScope.label} · ${status.label}`}
         />
         <MetricCard
           icon="shield"
           iconTone="blue"
-          label={t('home.confidence')}
-          value={
-            quote?.status === 'valid'
-              ? t(`home.confidence.${quote.confidence}`)
-              : quote?.status === 'pending'
-                ? t('home.pending')
-                : t('home.unavailable')
-          }
-          detail={
-            quote?.validObservationCount
-              ? formatObservationCount(quote.validObservationCount, locale, t)
-              : t('home.needPairedDeltas')
-          }
+          label={t('home.totalTokens')}
+          value={selectedTokenCount.toLocaleString(locale)}
+          detail={t('home.unpricedEvents', { count: unpricedEventCount })}
         />
       </div>
+      <HarnessUsagePanel usage={harnessUsage} locale={locale} profileId={graphScope} onProfileChange={onGraphScopeChange} />
       <footer className="app-footer">
         <span>
           <Icon name="info" size={16} />
@@ -499,6 +438,9 @@ export default function App() {
   const [range, setRange] = useState<Range>('1W');
   const [status, setStatus] = useState<AppStatus>(demoStatus);
   const [quote, setQuote] = useState<CurrentQuote | null>(demoQuote);
+  const [harnessUsage, setHarnessUsage] = useState<HarnessUsageResponse>(demoHarnessUsage);
+  const [graphScope, setGraphScope] = useState('all');
+  const [harnessGraph, setHarnessGraph] = useState<HistoryResponse>(() => getDemoHistory('1W'));
   const activeRange = useRef(range);
   const historyCache = useRef<Partial<Record<Range, HistoryResponse>>>({});
   const refreshInFlight = useRef(false);
@@ -510,7 +452,6 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
-  const [starterPageVisible, setStarterPageVisible] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState>(initialUpdateState);
   const updateInFlight = useRef(false);
 
@@ -536,12 +477,15 @@ export default function App() {
       // worker. Show that state immediately instead of keeping the whole window
       // behind the initial data-read promise.
       setStatus(nextStatus);
-      const [nextQuote, nextHistories, nextAnnotations, nextDiagnostics] = await Promise.all([
-        getCurrentQuote(),
-        Promise.all(historyRanges.map(async (item) => [item, await getHistory(item)] as const)),
-        getAnnotations(),
-        getDiagnosticsSummary(),
-      ]);
+      const [nextQuote, nextHistories, nextAnnotations, nextDiagnostics, nextHarnessUsage, nextHarnessGraph] =
+        await Promise.all([
+          getCurrentQuote(),
+          Promise.all(historyRanges.map(async (item) => [item, await getHistory(item)] as const)),
+          getAnnotations(),
+          getDiagnosticsSummary(),
+          getHarnessUsage(),
+          getHarnessHistory(requestedRange ?? activeRange.current, graphScope === 'all' ? null : graphScope),
+        ]);
       const historyUpdates = Object.fromEntries(nextHistories) as Partial<
         Record<Range, HistoryResponse>
       >;
@@ -551,6 +495,8 @@ export default function App() {
       setHistories((current) => ({ ...current, ...historyUpdates }));
       setAnnotations(nextAnnotations);
       setDiagnostics(nextDiagnostics);
+      setHarnessUsage(nextHarnessUsage);
+      setHarnessGraph(nextHarnessGraph);
       setLoadError(false);
     } catch {
       setQuote(null);
@@ -570,7 +516,7 @@ export default function App() {
       setIsRefreshing(false);
       refreshInFlight.current = false;
     }
-  }, []);
+  }, [graphScope]);
 
   useEffect(() => {
     void refresh();
@@ -657,14 +603,6 @@ export default function App() {
   }, [checkForUpdates, updateState]);
 
   useEffect(() => {
-    void checkForUpdates();
-  }, [checkForUpdates]);
-
-  useEffect(() => {
-    if (settings && !settings.starterPageSeen) setStarterPageVisible(true);
-  }, [settings]);
-
-  useEffect(() => {
     const timer = window.setInterval(
       () => void refresh(),
       (settings?.refreshIntervalSeconds ?? 10) * 1_000,
@@ -688,6 +626,18 @@ export default function App() {
     activeRange.current = nextRange;
     setRange(nextRange);
     void refresh(nextRange);
+  };
+
+  const handleGraphScopeChange = async (nextScope: string) => {
+    setGraphScope(nextScope);
+    setIsRefreshing(true);
+    try {
+      setHarnessGraph(await getHarnessHistory(range, nextScope === 'all' ? null : nextScope));
+    } catch {
+      setLoadError(true);
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const handleSettingChange = async (key: keyof AppSettings, value: number | boolean | string) => {
@@ -717,17 +667,6 @@ export default function App() {
       throw new Error('save failed');
     }
   };
-
-  const handleStarterPageComplete = async () => {
-    if (!settings) return;
-    const nextSettings = { ...settings, starterPageSeen: true };
-    const savedSettings = await updateSettings(nextSettings);
-    setSettings(savedSettings);
-    setStarterPageVisible(false);
-    void refresh();
-  };
-
-  const handleOpenStarterPage = () => setStarterPageVisible(true);
 
   const handleShareGraph = useCallback(async () => {
     await openExternalUrl(SHARE_GRAPH_DISCUSSION_URL);
@@ -824,7 +763,6 @@ export default function App() {
     localOnly: true as const,
     telemetry: false as const,
     autoUpdater: false as const,
-    starterPageSeen: true,
     installationMarker: '',
     customPricing: [],
   };
@@ -845,6 +783,7 @@ export default function App() {
           <SetupView
             status={status}
             settings={displaySettings}
+            harnessUsage={harnessUsage}
             onChooseHome={handleChooseHome}
             onChooseExecutable={handleChooseExecutable}
             onRetry={runDetection}
@@ -886,7 +825,6 @@ export default function App() {
             onResetAllData={handleResetAllData}
             onRestoreLastCheckpoint={handleRestoreLastCheckpoint}
             onImportAllData={handleImportAllData}
-            onOpenStarterPage={handleOpenStarterPage}
           />
         );
       default:
@@ -894,13 +832,16 @@ export default function App() {
           <HomeView
             status={status}
             quote={quote}
-            history={displayHistory}
+            history={harnessGraph}
             annotations={annotations}
+            harnessUsage={harnessUsage}
+            graphScope={graphScope}
             range={range}
             reducedMotion={displaySettings.reducedMotion}
             isRefreshing={isRefreshing}
             onRefresh={() => void refresh()}
             onRangeChange={handleRangeChange}
+            onGraphScopeChange={(scope) => void handleGraphScopeChange(scope)}
             onShareGraph={handleShareGraph}
             onResetAnnotations={async () => {
               try {
@@ -914,17 +855,6 @@ export default function App() {
         );
     }
   };
-
-  if (starterPageVisible && settings) {
-    return (
-      <I18nProvider locale={locale}>
-        <StarterPage
-          version={updateState.currentVersion || CURRENT_APP_VERSION}
-          onComplete={handleStarterPageComplete}
-        />
-      </I18nProvider>
-    );
-  }
 
   return (
     <I18nProvider locale={locale}>

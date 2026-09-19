@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::parser::{
-    event_fingerprint, parse_newline_terminated_bytes_with_state, ParseStats, ParserState,
-    UsageEvent,
+    event_fingerprint, parse_newline_terminated_bytes_with_state, parse_profile_jsonl_line,
+    ParseStats, ParserState, UsageEvent,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -24,8 +24,103 @@ pub struct PersistedCheckpoint {
     pub parser_state_json: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct HarnessProfile {
+    pub id: String,
+    pub harness: String,
+    pub label: String,
+    pub root: PathBuf,
+    pub available: bool,
+}
+
+pub fn is_visible_harness_profile(harness: &str, profile_id: &str) -> bool {
+    harness != "claude"
+        || (!matches!(
+            profile_id,
+            "claude-.claude" | "claude-personal" | "claude-.memsearch"
+        ) && !profile_id.contains("memsearch"))
+}
+
+pub fn discover_harness_profiles(codex_home: Option<&Path>) -> Vec<HarnessProfile> {
+    let mut profiles = Vec::new();
+    if let Some(root) = codex_home {
+        profiles.push(HarnessProfile {
+            id: "codex-default".into(),
+            harness: "codex".into(),
+            label: "Codex".into(),
+            root: root.into(),
+            available: root.is_dir(),
+        });
+    }
+    let Some(home) = dirs::home_dir() else {
+        return profiles;
+    };
+    let mut add = |id: &str, harness: &str, label: &str, root: PathBuf| {
+        profiles.push(HarnessProfile {
+            id: id.into(),
+            harness: harness.into(),
+            label: label.into(),
+            available: root.is_dir(),
+            root,
+        });
+    };
+    add(
+        "claude-default",
+        "claude",
+        "Claude · personal",
+        home.join(".claude").join("projects"),
+    );
+    let claude_profiles = home.join(".claude-profiles");
+    if let Ok(entries) = fs::read_dir(claude_profiles) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.')
+                    || name == "personal"
+                    || name.eq_ignore_ascii_case("memsearch")
+                {
+                    continue;
+                }
+                add(
+                    &format!("claude-{name}"),
+                    "claude",
+                    &format!("Claude · {name}"),
+                    entry.path().join("projects"),
+                );
+            }
+        }
+    }
+    add(
+        "omp-default",
+        "omp",
+        "OMP",
+        home.join(".omp").join("agent").join("sessions"),
+    );
+    add(
+        "copilot-default",
+        "copilot",
+        "Copilot",
+        home.join(".copilot").join("session-state"),
+    );
+    add(
+        "kiro-default",
+        "kiro",
+        "Kiro",
+        home.join(".kiro").join("crew").join("usage").join("tokens"),
+    );
+    add(
+        "devin-default",
+        "devin",
+        "Devin",
+        home.join(".config").join("devin").join("usage"),
+    );
+    profiles
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CollectionSummary {
+    pub profile_id: String,
+    pub harness: String,
     pub events: Vec<UsageEvent>,
     pub checkpoints: Vec<SourceCheckpoint>,
     pub stats: ParseStats,
@@ -44,11 +139,15 @@ struct TraversalState {
     skipped_symlinks: u64,
 }
 
-fn collect_jsonl_paths(
+fn collect_jsonl_paths<F>(
     directory: &Path,
     output: &mut Vec<PathBuf>,
     state: &mut TraversalState,
-) -> Result<(), String> {
+    accept: &F,
+) -> Result<(), String>
+where
+    F: Fn(&Path) -> bool,
+{
     let canonical = fs::canonicalize(directory)
         .map_err(|_| "unable to access a Codex data directory during scan".to_string())?;
     if !state.visited_directories.insert(canonical) {
@@ -67,12 +166,13 @@ fn collect_jsonl_paths(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_jsonl_paths(&path, output, state)?;
+            collect_jsonl_paths(&path, output, state, accept)?;
         } else if file_type.is_file()
             && path
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"))
+            && accept(&path)
         {
             output.push(path);
         }
@@ -124,9 +224,11 @@ pub fn scan_codex_home_with_state(
 ) -> Result<CollectionSummary, String> {
     let mut paths = Vec::new();
     let mut traversal = TraversalState::default();
-    collect_jsonl_paths(home, &mut paths, &mut traversal)?;
+    collect_jsonl_paths(home, &mut paths, &mut traversal, &|_| true)?;
     paths.sort_by_key(|path| (!is_active_source(path), source_key(path)));
     let mut summary = CollectionSummary {
+        profile_id: "codex-default".into(),
+        harness: "codex".into(),
         skipped_symlinks: traversal.skipped_symlinks,
         ..CollectionSummary::default()
     };
@@ -205,7 +307,9 @@ pub fn scan_codex_home_with_state(
             summary.stats.imported_records += stats.imported_records;
             summary.stats.partial_line_retries += stats.partial_line_retries;
             summary.stats.rejected_records += stats.rejected_records;
-            for event in events {
+            for mut event in events {
+                event.profile_id = summary.profile_id.clone();
+                event.harness = summary.harness.clone();
                 if seen.insert(event_fingerprint(&event)) {
                     summary.events.push(event);
                 }
@@ -226,6 +330,116 @@ pub fn scan_codex_home_with_state(
     Ok(summary)
 }
 
+pub fn scan_profile_jsonl(
+    root: &Path,
+    profile_id: &str,
+    harness: &str,
+    previous: &HashMap<String, PersistedCheckpoint>,
+) -> Result<CollectionSummary, String> {
+    let mut paths = Vec::new();
+    let mut traversal = TraversalState::default();
+    let accepts = |path: &Path| {
+        if harness == "copilot" {
+            path.file_name().is_some_and(|name| name == "events.jsonl")
+                && !path
+                    .components()
+                    .any(|component| component.as_os_str() == "files")
+        } else {
+            true
+        }
+    };
+    collect_jsonl_paths(root, &mut paths, &mut traversal, &accepts)?;
+    paths.sort_by_key(|path| (!is_active_source(path), source_key(path)));
+    let mut summary = CollectionSummary {
+        profile_id: profile_id.into(),
+        harness: harness.into(),
+        skipped_symlinks: traversal.skipped_symlinks,
+        ..CollectionSummary::default()
+    };
+    let mut seen = HashSet::new();
+    for path in paths {
+        let key = source_key(&path);
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                summary.interrupted_sources.push(key);
+                continue;
+            }
+        };
+        let size = metadata.len();
+        let requested_offset = previous
+            .get(&key)
+            .map(|checkpoint| checkpoint.byte_offset)
+            .unwrap_or(0);
+        let offset = if requested_offset > size {
+            0
+        } else {
+            requested_offset
+        };
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(_) => {
+                summary.interrupted_sources.push(key);
+                continue;
+            }
+        };
+        let mut reader = BufReader::new(file);
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            summary.interrupted_sources.push(key);
+            continue;
+        }
+        let mut line = Vec::new();
+        let mut next_offset = offset;
+        let mut read_failed = false;
+        loop {
+            line.clear();
+            let bytes_read = match reader.read_until(b'\n', &mut line) {
+                Ok(bytes_read) => bytes_read,
+                Err(_) => {
+                    read_failed = true;
+                    break;
+                }
+            };
+            if bytes_read == 0 {
+                break;
+            }
+            let terminal_newline = line.last().is_some_and(|byte| *byte == b'\n');
+            let complete_unterminated_record =
+                !terminal_newline && has_complete_unterminated_record(&line);
+            if !terminal_newline && !complete_unterminated_record {
+                if !line.iter().all(|byte| byte.is_ascii_whitespace()) {
+                    summary.stats.partial_line_retries += 1;
+                }
+                break;
+            }
+            let record = std::str::from_utf8(&line).unwrap_or_default();
+            match parse_profile_jsonl_line(profile_id, harness, record) {
+                Ok(events) => {
+                    summary.stats.imported_records += 1;
+                    for event in events {
+                        if seen.insert(event_fingerprint(&event)) {
+                            summary.events.push(event);
+                        }
+                    }
+                }
+                Err(_) => summary.stats.rejected_records += 1,
+            }
+            next_offset += bytes_read as u64;
+        }
+        if read_failed {
+            summary.interrupted_sources.push(key);
+            continue;
+        }
+        summary.checkpoints.push(SourceCheckpoint {
+            source_key: key,
+            byte_offset: next_offset.min(size),
+            source_active: is_active_source(&path),
+            parser_state_json: String::new(),
+        });
+    }
+    Ok(summary)
+}
+
 pub fn stats_add(left: &mut ParseStats, right: &ParseStats) {
     left.imported_records += right.imported_records;
     left.partial_line_retries += right.partial_line_retries;
@@ -236,6 +450,15 @@ pub fn stats_add(left: &mut ParseStats, right: &ParseStats) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn hides_duplicate_and_memsearch_claude_profiles() {
+        assert!(is_visible_harness_profile("claude", "claude-default"));
+        assert!(is_visible_harness_profile("claude", "claude-work"));
+        assert!(!is_visible_harness_profile("claude", "claude-.claude"));
+        assert!(!is_visible_harness_profile("claude", "claude-.memsearch"));
+        assert!(!is_visible_harness_profile("claude", "claude-personal"));
+    }
 
     #[test]
     fn scans_with_byte_offsets_and_active_files_first() {

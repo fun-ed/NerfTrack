@@ -98,6 +98,26 @@ export interface HistoryResponse {
   bucket: 'raw' | '5m' | '30m' | '2h' | '4h';
 }
 
+export interface HarnessUsageSummary {
+  profileId: string;
+  harness: string;
+  label: string;
+  available: boolean;
+  eventCount: number;
+  pricedEventCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  estimatedCostUsd: number | null;
+  reportedCostUsd: number | null;
+}
+
+export interface HarnessUsageResponse {
+  summaries: HarnessUsageSummary[];
+  total: HarnessUsageSummary;
+}
+
 export interface Annotation {
   id: string;
   timestamp: number;
@@ -134,7 +154,6 @@ export interface AppSettings extends AdvancedSettings {
   localOnly: true;
   telemetry: false;
   autoUpdater: false;
-  starterPageSeen: boolean;
   installationMarker: string;
   customPricing: Array<CustomPriceOverride>;
 }

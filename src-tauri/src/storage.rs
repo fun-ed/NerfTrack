@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use crate::collector::{CollectionSummary, PersistedCheckpoint};
 use crate::models::{
     Annotation, AnnotationKind, AppSettings, Confidence, CurrentQuote, DiagnosticReason,
-    DiagnosticsSummary, HistoryPoint, HistoryResponse, QuoteStatus, Range, RangeStatistics,
-    ALGORITHM_VERSION, PRICING_RULE_VERSION, RECONSTRUCTION_VERSION,
+    DiagnosticsSummary, HarnessUsageResponse, HarnessUsageSummary, HistoryPoint, HistoryResponse,
+    QuoteStatus, Range, RangeStatistics, ALGORITHM_VERSION, PRICING_RULE_VERSION,
+    RECONSTRUCTION_VERSION,
 };
 use crate::parser::{
     event_fingerprint, fast_multiplier_for_model, SpeedMode, SpeedSource, UsageEvent,
@@ -224,7 +225,11 @@ fn event_cost(
     remote_pricing: &PricingCatalog,
 ) -> Result<PricedEvent, String> {
     let model = pricing::normalize_model_id(&event.model);
-    let canonical_model = pricing::canonical_api_model_id(&model);
+    let canonical_model = if event.provider == "openai" {
+        pricing::canonical_api_model_id(&model)
+    } else {
+        model.clone()
+    };
     let custom = settings.custom_pricing.iter().find(|override_price| {
         pricing::canonical_api_model_id(&override_price.model_id) == canonical_model
             || override_price
@@ -232,17 +237,18 @@ fn event_cost(
                 .as_deref()
                 .is_some_and(|alias| pricing::canonical_api_model_id(alias) == canonical_model)
     });
-    let (price, source, remote_tier) = if let Some(price) = custom {
+    let (price, cache_write_rate, source, remote_tier) = if let Some(price) = custom {
         (
             ApiPrice {
                 input: price.input_usd_per_million,
                 cached_input: price.cached_input_usd_per_million,
                 output: price.output_usd_per_million,
             },
+            0.0,
             "custom",
             None,
         )
-    } else if let Some(price) = remote_pricing.find(&model) {
+    } else if let Some(price) = remote_pricing.find(&event.provider, &model) {
         let remote_tiers = price.long_context_tiers;
         (
             ApiPrice {
@@ -250,11 +256,17 @@ fn event_cost(
                 cached_input: price.cached_input,
                 output: price.output,
             },
+            price.cache_write,
             "models_dev",
             Some(remote_tiers),
         )
-    } else if let Some(price) = official_price(&canonical_model) {
-        (price, "official", None)
+    } else if event.provider == "openai" {
+        let Some(price) = official_price(&canonical_model) else {
+            return Err(format!(
+                "unknown API price for model {model}; add a local custom price override"
+            ));
+        };
+        (price, 0.0, "official", None)
     } else {
         return Err(format!(
             "unknown API price for model {model}; add a local custom price override"
@@ -300,6 +312,7 @@ fn event_cost(
     };
     let ordinary_cost = (uncached_input as f64 * input_rate * multiplier_input
         + event.cached_input_tokens as f64 * cached_input_rate
+        + event.cache_write_tokens as f64 * cache_write_rate
         + billed_output as f64 * output_rate * multiplier_output)
         / 1_000_000.0;
     let fast_multiplier = fast_multiplier_for_model(&model, effective_speed_mode(event));
@@ -677,11 +690,16 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS usage_events (
                     fingerprint TEXT PRIMARY KEY,
                     account_key TEXT,
+                    profile_id TEXT NOT NULL DEFAULT 'codex-default',
+                    harness TEXT NOT NULL DEFAULT 'codex',
+                    provider_id TEXT NOT NULL DEFAULT 'openai',
                     timestamp_ms INTEGER NOT NULL,
                     model_id TEXT NOT NULL,
                     input_tokens INTEGER NOT NULL,
                     cached_input_tokens INTEGER NOT NULL,
+                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL,
+                    reported_cost_usd REAL,
                     eligible INTEGER NOT NULL DEFAULT 0,
                     pricing_status TEXT NOT NULL DEFAULT 'not_applicable',
                     cost_usd REAL,
@@ -1041,6 +1059,57 @@ impl Database {
                 )
                 .map_err(|error| format!("service-tier accounting migration failed: {error}"))?;
         }
+        if previous_version < 12 {
+            for (column, definition) in [
+                ("profile_id", "TEXT NOT NULL DEFAULT 'codex-default'"),
+                ("harness", "TEXT NOT NULL DEFAULT 'codex'"),
+                ("provider_id", "TEXT NOT NULL DEFAULT 'openai'"),
+                ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("reported_cost_usd", "REAL"),
+            ] {
+                if !self.column_exists("usage_events", column)? {
+                    self.connection
+                        .execute(
+                            &format!("ALTER TABLE usage_events ADD COLUMN {column} {definition}"),
+                            [],
+                        )
+                        .map_err(|_| format!("unable to migrate usage_events.{column}"))?;
+                }
+            }
+            if self.table_exists("reset_checkpoint_usage_events")? {
+                for (column, definition) in [
+                    ("profile_id", "TEXT NOT NULL DEFAULT 'codex-default'"),
+                    ("harness", "TEXT NOT NULL DEFAULT 'codex'"),
+                    ("provider_id", "TEXT NOT NULL DEFAULT 'openai'"),
+                    ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                    ("reported_cost_usd", "REAL"),
+                ] {
+                    if !self.column_exists("reset_checkpoint_usage_events", column)? {
+                        self.connection
+                            .execute(
+                                &format!(
+                                    "ALTER TABLE reset_checkpoint_usage_events ADD COLUMN {column} {definition}"
+                                ),
+                                [],
+                            )
+                            .map_err(|_| {
+                                format!("unable to migrate reset checkpoint usage_events.{column}")
+                            })?;
+                    }
+                }
+            }
+            self.connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     CREATE INDEX IF NOT EXISTS idx_usage_events_profile_timestamp
+                         ON usage_events(profile_id, timestamp_ms);
+                     INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms)
+                         VALUES (12, strftime('%s','now') * 1000);
+                     PRAGMA user_version=12;
+                     COMMIT;",
+                )
+                .map_err(|error| format!("multi-harness migration failed: {error}"))?;
+        }
         if self.load_settings().is_err() {
             self.save_settings(&AppSettings::default())?;
         }
@@ -1102,6 +1171,16 @@ impl Database {
             .map_err(|_| "unable to inspect database schema".to_string())?;
         let exists = columns.filter_map(Result::ok).any(|name| name == column);
         Ok(exists)
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                params![table],
+                |row| row.get(0),
+            )
+            .map_err(|_| "unable to inspect database schema".to_string())
     }
 
     fn restrict_file_permissions(&self) {
@@ -1511,26 +1590,31 @@ impl Database {
         let inserted = transaction
             .prepare_cached(
                 "INSERT OR IGNORE INTO usage_events (
-                    fingerprint, account_key, timestamp_ms, model_id, original_model_id, input_tokens,
-                    cached_input_tokens, output_tokens, reasoning_tokens, long_context, eligible,
+                    fingerprint, account_key, profile_id, harness, provider_id, timestamp_ms, model_id, original_model_id, input_tokens,
+                    cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, reported_cost_usd, long_context, eligible,
                     pricing_status, cost_usd, pricing_rule_version, pricing_source_digest,
                     effective_input_rate, effective_cached_input_rate, effective_output_rate,
                     input_multiplier, output_multiplier, speed_mode, speed_source,
                     fast_multiplier, quota_reset_at_ms, quota_limit_id
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             )
             .and_then(|mut statement| {
                 statement.execute(params![
                     event_fingerprint(event),
                     account_key,
+                    event.profile_id,
+                    event.harness,
+                    event.provider,
                     event.timestamp_ms,
                     event.model.trim().to_ascii_lowercase().replace('/', "-"),
                     event.model.as_str(),
                     event.input_tokens as i64,
                     event.cached_input_tokens as i64,
+                    event.cache_write_tokens as i64,
                     event.output_tokens as i64,
                     event.reasoning_tokens as i64,
+                    event.reported_cost_usd,
                     i64::from(event.long_context),
                     eligible,
                     pricing_status,
@@ -1732,16 +1816,17 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "SELECT fingerprint, COALESCE(original_model_id, model_id), input_tokens,
-                            cached_input_tokens, output_tokens, reasoning_tokens, long_context,
-                            speed_mode, speed_source
+                            cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+                            long_context, speed_mode, speed_source, profile_id, harness, provider_id,
+                            reported_cost_usd
                      FROM usage_events",
                 )
                 .map_err(|_| "unable to read imported usage for repricing".to_string())?;
             let rows = statement
                 .query_map([], |row| {
                     let model: String = row.get(1)?;
-                    let speed_mode = SpeedMode::from_stored(&row.get::<_, String>(7)?);
-                    let speed_source = SpeedSource::from_stored(&row.get::<_, String>(8)?);
+                    let speed_mode = SpeedMode::from_stored(&row.get::<_, String>(8)?);
+                    let speed_source = SpeedSource::from_stored(&row.get::<_, String>(9)?);
                     let normalized_speed_mode = if speed_mode == SpeedMode::Fast
                         && speed_source != SpeedSource::RolloutSetting
                     {
@@ -1759,12 +1844,17 @@ impl Database {
                     Ok(StoredUsageForPricing {
                         fingerprint: row.get(0)?,
                         event: UsageEvent {
+                            profile_id: row.get(10)?,
+                            harness: row.get(11)?,
+                            provider: row.get(12)?,
                             model: model.clone(),
                             input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                             cached_input_tokens: row.get::<_, i64>(3)?.max(0) as u64,
-                            output_tokens: row.get::<_, i64>(4)?.max(0) as u64,
-                            reasoning_tokens: row.get::<_, i64>(5)?.max(0) as u64,
-                            long_context: row.get::<_, i64>(6)? != 0,
+                            cache_write_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                            output_tokens: row.get::<_, i64>(5)?.max(0) as u64,
+                            reasoning_tokens: row.get::<_, i64>(6)?.max(0) as u64,
+                            reported_cost_usd: row.get(13)?,
+                            long_context: row.get::<_, i64>(7)? != 0,
                             speed_mode: normalized_speed_mode,
                             speed_source: normalized_speed_source,
                             fast_multiplier: fast_multiplier_for_model(
@@ -3053,6 +3143,185 @@ impl Database {
             privacy:
                 "Public models.dev pricing metadata may be fetched at launch; prompts, account identifiers, usage data, and full local paths are never sent or returned."
                     .into(),
+        })
+    }
+
+    pub fn harness_usage(&self) -> Result<HarnessUsageResponse, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT profile_id, harness, COUNT(*),
+                        SUM(CASE WHEN eligible=1 THEN 1 ELSE 0 END),
+                        SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_tokens),
+                        SUM(output_tokens), SUM(cost_usd), SUM(reported_cost_usd)
+                 FROM usage_events
+                 GROUP BY profile_id, harness
+                 ORDER BY harness, profile_id",
+            )
+            .map_err(|_| "unable to read harness usage".to_string())?;
+        let summaries = statement
+            .query_map([], |row| {
+                Ok(HarnessUsageSummary {
+                    profile_id: row.get(0)?,
+                    harness: row.get(1)?,
+                    label: row.get::<_, String>(0)?,
+                    available: true,
+                    event_count: row.get(2)?,
+                    priced_event_count: row.get(3)?,
+                    input_tokens: row.get(4)?,
+                    cached_input_tokens: row.get(5)?,
+                    cache_write_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    estimated_cost_usd: row.get(8)?,
+                    reported_cost_usd: row.get(9)?,
+                })
+            })
+            .map_err(|_| "unable to query harness usage".to_string())?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let total = summaries.iter().fold(
+            HarnessUsageSummary {
+                profile_id: "all".into(),
+                harness: "all".into(),
+                label: "All Harness".into(),
+                available: true,
+                event_count: 0,
+                priced_event_count: 0,
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_usd: None,
+                reported_cost_usd: None,
+            },
+            |mut total, item| {
+                total.event_count += item.event_count;
+                total.priced_event_count += item.priced_event_count;
+                total.input_tokens += item.input_tokens;
+                total.cached_input_tokens += item.cached_input_tokens;
+                total.cache_write_tokens += item.cache_write_tokens;
+                total.output_tokens += item.output_tokens;
+                if let Some(cost) = item.estimated_cost_usd {
+                    total.estimated_cost_usd =
+                        Some(total.estimated_cost_usd.unwrap_or_default() + cost);
+                }
+                if let Some(cost) = item.reported_cost_usd {
+                    total.reported_cost_usd =
+                        Some(total.reported_cost_usd.unwrap_or_default() + cost);
+                }
+                total
+            },
+        );
+        Ok(HarnessUsageResponse { summaries, total })
+    }
+
+    pub fn harness_history(
+        &self,
+        range: Range,
+        profile_id: Option<&str>,
+    ) -> Result<HistoryResponse, String> {
+        let start = now_ms().saturating_sub(range.duration_ms());
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT profile_id, harness, timestamp_ms, cost_usd, reported_cost_usd
+                 FROM usage_events
+                 WHERE timestamp_ms >= ?1
+                   AND (?2 IS NULL OR profile_id=?2)
+                   AND (cost_usd IS NOT NULL OR reported_cost_usd IS NOT NULL)
+                 ORDER BY timestamp_ms, fingerprint",
+            )
+            .map_err(|_| "unable to read harness history".to_string())?;
+        let rows = statement
+            .query_map(params![start, profile_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                ))
+            })
+            .map_err(|_| "unable to query harness history".to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| "unable to decode harness history".to_string())?;
+        let rows = rows
+            .into_iter()
+            .filter(|(profile_id, harness, ..)| {
+                crate::collector::is_visible_harness_profile(harness, profile_id)
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(empty_history(range));
+        }
+        let event_count = rows.len();
+        let mut api_cost = 0.0;
+        let mut reported_cost = 0.0;
+        let mut has_api_cost = false;
+        let mut has_reported_cost = false;
+        let mut points = Vec::with_capacity(rows.len() + 1);
+        points.push(HistoryPoint {
+            timestamp: start,
+            estimated_weekly_value_usd: Some(0.0),
+            raw_estimated_weekly_value_usd: Some(0.0),
+            observed_cost_usd: Some(0.0),
+            weekly_used_percent: None,
+            reset_at: None,
+            reset_reason: None,
+            is_finalized: true,
+            is_heartbeat: false,
+            epoch: Some(0),
+            confidence: Confidence::High,
+            percentage_coverage: Some(100.0),
+        });
+        for (_, _, timestamp, event_api_cost, event_reported_cost) in rows {
+            if let Some(cost) = event_api_cost.filter(|cost| cost.is_finite() && *cost >= 0.0) {
+                api_cost += cost;
+                has_api_cost = true;
+            }
+            if let Some(cost) = event_reported_cost.filter(|cost| cost.is_finite() && *cost >= 0.0)
+            {
+                reported_cost += cost;
+                has_reported_cost = true;
+            }
+            points.push(HistoryPoint {
+                timestamp,
+                estimated_weekly_value_usd: has_api_cost.then_some(api_cost),
+                raw_estimated_weekly_value_usd: has_api_cost.then_some(api_cost),
+                observed_cost_usd: has_reported_cost.then_some(reported_cost),
+                weekly_used_percent: None,
+                reset_at: None,
+                reset_reason: None,
+                is_finalized: true,
+                is_heartbeat: false,
+                epoch: Some(0),
+                confidence: Confidence::High,
+                percentage_coverage: Some(100.0),
+            });
+        }
+        if !has_api_cost {
+            return Ok(empty_history(range));
+        }
+        let end = points.last().map(|point| point.timestamp).unwrap_or(start);
+        Ok(HistoryResponse {
+            points,
+            statistics: RangeStatistics {
+                range: range.clone(),
+                baseline_estimated_weekly_value_usd: Some(0.0),
+                baseline_timestamp: Some(start),
+                current_estimated_weekly_value_usd: Some(api_cost),
+                current_timestamp: Some(end),
+                delta_value_usd: Some(api_cost),
+                delta_percent: None,
+                point_count: event_count + 1,
+                partial: false,
+                requested_start_timestamp: Some(start),
+                available_start_timestamp: Some(start),
+                available_end_timestamp: Some(end),
+            },
+            bucket: range.bucket().into(),
+            pricing_rule_version: PRICING_RULE_VERSION.into(),
+            reconstruction_version: RECONSTRUCTION_VERSION.into(),
         })
     }
 
@@ -5027,6 +5296,49 @@ mod tests {
 
         assert_eq!(restored.locale, "zh-TW");
         assert_eq!(restored.advanced.refresh_interval_seconds, 20);
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn harness_history_aggregates_all_profiles_and_filters_one_profile() {
+        let (database, path) = database();
+        let timestamp = now_ms();
+        for (fingerprint, profile_id, cost) in [
+            ("harness-a", "codex-default", 1.25_f64),
+            ("harness-b", "claude-work", 2.75_f64),
+        ] {
+            database
+                .connection
+                .execute(
+                    "INSERT INTO usage_events (
+                        fingerprint, timestamp_ms, model_id, input_tokens, cached_input_tokens,
+                        output_tokens, eligible, pricing_status, cost_usd, profile_id, harness,
+                        provider_id
+                     ) VALUES (?1, ?2, 'test-model', 1, 0, 1, 1, 'models_dev', ?3, ?4, 'test', 'openai')",
+                    params![fingerprint, timestamp, cost, profile_id],
+                )
+                .expect("usage event");
+        }
+        let all = database
+            .harness_history(Range::M1, None)
+            .expect("all history");
+        let claude = database
+            .harness_history(Range::M1, Some("claude-work"))
+            .expect("profile history");
+
+        assert_eq!(all.statistics.current_estimated_weekly_value_usd, Some(4.0));
+        assert_eq!(
+            all.points
+                .last()
+                .and_then(|point| point.percentage_coverage),
+            Some(100.0)
+        );
+        assert_eq!(
+            claude.statistics.current_estimated_weekly_value_usd,
+            Some(2.75)
+        );
+        assert_eq!(claude.points.len(), 2);
         drop(database);
         let _ = fs::remove_file(path);
     }

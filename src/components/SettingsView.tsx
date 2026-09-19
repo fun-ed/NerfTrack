@@ -11,7 +11,6 @@ interface SettingsViewProps {
   onResetAllData: () => Promise<void>;
   onRestoreLastCheckpoint: () => Promise<void>;
   onImportAllData: () => Promise<void>;
-  onOpenStarterPage: () => void;
 }
 
 const advancedRows: Array<{
@@ -66,7 +65,6 @@ export function SettingsView({
   onResetAllData,
   onRestoreLastCheckpoint,
   onImportAllData,
-  onOpenStarterPage,
 }: SettingsViewProps) {
   const { t } = useI18n();
   const [dataAction, setDataAction] = useState<
@@ -375,17 +373,6 @@ export function SettingsView({
             {pricingSaving ? t('settings.saving') : t('settings.savePricing')}
           </button>
         </div>
-      </section>
-      <section className="panel starter-settings-panel" aria-labelledby="starter-settings-heading">
-        <div>
-          <span className="settings-kicker">{t('settings.community')}</span>
-          <h2 id="starter-settings-heading">{t('settings.starterPage')}</h2>
-          <p>{t('settings.starterDescription')}</p>
-        </div>
-        <button type="button" className="data-action-button" onClick={onOpenStarterPage}>
-          <Icon name="refresh" size={15} />
-          {t('settings.openStarter')}
-        </button>
       </section>
       <section className="panel data-management-panel" aria-labelledby="data-management-heading">
         <div className="panel-heading">

@@ -12,6 +12,9 @@ interface UsageChartProps {
   reducedMotion: boolean;
   changeValueUsd?: number | null;
   baselineEstimatedWeeklyValueUsd?: number | null;
+  title?: string;
+  subtitle?: string;
+  ariaLabel?: string;
   onScrub?: (point: HistoryPoint | null, anchor: HistoryPoint | null) => void;
 }
 
@@ -333,6 +336,9 @@ export function UsageChart({
   reducedMotion,
   changeValueUsd = null,
   baselineEstimatedWeeklyValueUsd = null,
+  title,
+  subtitle,
+  ariaLabel,
   onScrub,
 }: UsageChartProps) {
   const { locale, t } = useI18n();
@@ -588,8 +594,8 @@ export function UsageChart({
       style={{ '--chart-color': chartColor } as React.CSSProperties}
     >
       <div className="chart-value-label">
-        <span>{t('chart.title')}</span>
-        <small>{t('chart.subtitle')}</small>
+        <span>{title ?? t('chart.title')}</span>
+        <small>{subtitle ?? t('chart.subtitle')}</small>
       </div>
       <div className="chart-canvas-wrap">
         {noUsageHover && (
@@ -644,7 +650,7 @@ export function UsageChart({
           className={`chart-canvas ${isDragging.current ? 'is-scrubbing' : ''}`}
           viewBox={`0 0 ${chartWidth} ${chartHeight}`}
           role="img"
-          aria-label={t('chart.aria')}
+          aria-label={ariaLabel ?? t('chart.aria')}
           aria-grabbed={isDragging.current}
           tabIndex={0}
           onPointerDown={(event) => {
