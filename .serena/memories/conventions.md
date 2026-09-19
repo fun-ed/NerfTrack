@@ -1,0 +1,6 @@
+# Conventions
+- TypeScript is strict; React components use function components and hooks. Keep Tauri boundary types in `src/domain.ts`; invoke native behavior through `src/lib/commands.ts` rather than direct UI calls. Browser mode must retain deterministic fixture fallbacks.
+- Prettier: semicolons, single quotes, trailing commas, 100-character print width. ESLint enables recommended TypeScript and React Hooks rules; `any` is deliberately permitted.
+- Rust keeps modules narrow and models typed DTOs in `models.rs`. Errors at app/command boundaries become `Result<_, String>`; guard shared database/application state with `Arc<Mutex<_>>`.
+- Put frontend tests beside source as `*.test.ts(x)` (Vitest include: `src/**/*.{test,spec}.{ts,tsx}`); Rust unit tests are colocated in module `#[cfg(test)]` sections. Use synthetic JSONL/temp candidates—not real Codex records or host paths.
+- Do not add dependencies casually: license, network/telemetry, and local-privacy effects must be justified; keep manifests and lockfiles synchronized.

@@ -1,0 +1,5 @@
+# Task completion
+- For frontend-only changes, run affected Vitest tests plus `npm run format:check`, `npm run lint`, `npm run typecheck`, and `npm run build` where practical.
+- For Rust changes, run focused `cargo test --manifest-path src-tauri/Cargo.toml <filter>` then the Rust formatting, clippy, and full test gates.
+- Repository CI gates: `npm run format:check && npm run lint && npm run typecheck && npm test -- --run && npm run build`; then `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`, `cargo test --manifest-path src-tauri/Cargo.toml`, and `git diff --check`.
+- For packaging/native integration changes, additionally run `npm run tauri:build` on the target platform where possible. Do not use real local Codex data in verification.
