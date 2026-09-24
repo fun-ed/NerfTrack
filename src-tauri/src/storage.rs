@@ -82,8 +82,8 @@ struct ApiPrice {
     output: f64,
 }
 
-// Verified 2026-09-04 from OpenAI's official model catalog and pricing pages;
-// see docs/CALCULATION.md for the source links. Rates are USD / 1M text tokens.
+// GPT-6 rates verified 2026-09-24 from OpenAI's official pricing pages; see
+// docs/CALCULATION.md for sources. Rates are USD / 1M text tokens.
 fn official_price(model: &str) -> Option<ApiPrice> {
     let model = pricing::canonical_api_model_id(model);
     match model.as_str() {
@@ -91,6 +91,16 @@ fn official_price(model: &str) -> Option<ApiPrice> {
             input: 10.0,
             cached_input: 1.0,
             output: 50.0,
+        }),
+        "gpt-6-sol" => Some(ApiPrice {
+            input: 2.0,
+            cached_input: 0.2,
+            output: 10.0,
+        }),
+        "gpt-6-luna" => Some(ApiPrice {
+            input: 0.1,
+            cached_input: 0.01,
+            output: 0.5,
         }),
         "gpt-5.6" | "gpt-5.6-sol" | "chat-latest" => Some(ApiPrice {
             input: 5.0,
@@ -284,7 +294,10 @@ fn event_cost(
     let documented_long_context = canonical_model.starts_with("gpt-5.4")
         || canonical_model.starts_with("gpt-5.5")
         || canonical_model.starts_with("gpt-5.6")
-        || canonical_model == "gpt-6-astra";
+        || matches!(
+            canonical_model.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        );
     if !has_remote_tiers && long_context && documented_long_context {
         multiplier_input = 2.0;
         multiplier_output = 1.5;
@@ -3983,6 +3996,67 @@ mod tests {
         assert_eq!(priced.output_multiplier, 1.5);
         assert_eq!(priced.effective_cached_input_rate, 2.0);
         assert!((priced.cost - 11.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_use_current_official_rates() {
+        for (model, input_rate, cached_rate, output_rate, standard_cost, cached_cost) in [
+            ("gpt-6-sol", 2.0, 0.2, 10.0, 1.2, 1.02),
+            ("gpt-6-luna", 0.1, 0.01, 0.5, 0.06, 0.051),
+        ] {
+            let event = UsageEvent {
+                model: model.into(),
+                input_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+                .expect("official price");
+            assert_eq!(priced.source, "official");
+            assert_eq!(priced.effective_input_rate, input_rate);
+            assert_eq!(priced.effective_cached_input_rate, cached_rate);
+            assert_eq!(priced.effective_output_rate, output_rate);
+            assert!((priced.cost - standard_cost).abs() < 1e-12, "{model}");
+
+            let cached_event = UsageEvent {
+                model: model.into(),
+                input_tokens: 100_000,
+                cached_input_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let cached_priced = event_cost(
+                &cached_event,
+                &AppSettings::default(),
+                &PricingCatalog::default(),
+            )
+            .expect("official cached price");
+            assert!((cached_priced.cost - cached_cost).abs() < 1e-12, "{model}");
+        }
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_apply_documented_long_context_rates() {
+        for (model, input_rate, cached_rate, output_rate, expected_cost) in [
+            ("gpt-6-sol", 2.0, 0.4, 10.0, 2.34),
+            ("gpt-6-luna", 0.1, 0.02, 0.5, 0.117),
+        ] {
+            let event = UsageEvent {
+                model: model.into(),
+                input_tokens: 300_000,
+                cached_input_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+                .expect("official long-context price");
+            assert_eq!(priced.input_multiplier, 2.0);
+            assert_eq!(priced.output_multiplier, 1.5);
+            assert_eq!(priced.effective_input_rate, input_rate);
+            assert_eq!(priced.effective_cached_input_rate, cached_rate);
+            assert_eq!(priced.effective_output_rate, output_rate);
+            assert!((priced.cost - expected_cost).abs() < 1e-12, "{model}");
+        }
     }
 
     #[test]

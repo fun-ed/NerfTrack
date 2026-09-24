@@ -282,7 +282,12 @@ pub fn fast_multiplier_for_model(model: &str, speed_mode: SpeedMode) -> f64 {
         return 1.0;
     }
     let normalized = crate::pricing::canonical_api_model_id(model);
-    if is_model_family(&normalized, "gpt-5.4") || normalized == "gpt-6-astra" {
+    if is_model_family(&normalized, "gpt-5.4")
+        || matches!(
+            normalized.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        )
+    {
         2.0
     } else {
         // GPT-5.5, GPT-5.6, and explicitly fast unknown/future models use the
@@ -1019,6 +1024,8 @@ mod tests {
             ("gpt-5.5", 2.5),
             ("gpt-5.6-pro", 2.5),
             ("gpt-6-astra", 2.0),
+            ("gpt-6-sol", 2.0),
+            ("gpt-6-luna", 2.0),
             ("gpt-5.7-future", 2.5),
         ] {
             assert_eq!(

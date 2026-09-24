@@ -15,6 +15,13 @@ Signing and notarization are secret-driven release steps and are not part of pul
 
 Validation: frontend formatting, lint, typecheck, 59 frontend tests, Rust formatting, Clippy, Rust tests, Tauri app build, installation, ad-hoc signing, and installed bundle verification.
 
+## 1.1.7 — 2026-09-24
+
+- Added offline API-equivalent prices for GPT-6 Sol ($2 input, $0.20 cached input, $10 output) and GPT-6 Luna ($0.10 input, $0.01 cached input, $0.50 output), per 1M tokens.
+- Applied GPT-6 long-context and Fast-mode rates and made the pricing-rule revision reprice existing stored usage.
+
+Validation: Prettier, ESLint, frontend typecheck, 59 frontend tests, Rust formatting, Clippy across all targets and features, 110 Rust tests, Tauri app build, installation, ad-hoc signing, and installed-bundle verification.
+
 ## 1.1.4 — 2026-08-25
 
 - Added a prominent Home-header action for browsing and posting in NerfTrack's Share Your Graph discussion.
