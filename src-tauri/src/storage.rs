@@ -83,8 +83,8 @@ struct ApiPrice {
     output: f64,
 }
 
-// Verified 2026-09-04 from OpenAI's official model catalog and pricing pages;
-// see docs/CALCULATION.md for the source links. Rates are USD / 1M text tokens.
+// GPT-6 rates verified 2026-09-24 from OpenAI's official pricing pages; see
+// docs/CALCULATION.md for sources. Rates are USD / 1M text tokens.
 fn official_price(model: &str) -> Option<ApiPrice> {
     let model = pricing::canonical_api_model_id(model);
     match model.as_str() {
@@ -92,6 +92,16 @@ fn official_price(model: &str) -> Option<ApiPrice> {
             input: 10.0,
             cached_input: 1.0,
             output: 50.0,
+        }),
+        "gpt-6-sol" => Some(ApiPrice {
+            input: 2.0,
+            cached_input: 0.2,
+            output: 10.0,
+        }),
+        "gpt-6-luna" => Some(ApiPrice {
+            input: 0.1,
+            cached_input: 0.01,
+            output: 0.5,
         }),
         "gpt-5.6" | "gpt-5.6-sol" | "chat-latest" => Some(ApiPrice {
             input: 5.0,
@@ -237,7 +247,7 @@ fn event_cost(
                 .as_deref()
                 .is_some_and(|alias| pricing::canonical_api_model_id(alias) == canonical_model)
     });
-    let (price, cache_write_rate, source, remote_tier) = if let Some(price) = custom {
+    let (price, mut cache_write_rate, source, remote_tier) = if let Some(price) = custom {
         (
             ApiPrice {
                 input: price.input_usd_per_million,
@@ -266,16 +276,23 @@ fn event_cost(
                 "unknown API price for model {model}; add a local custom price override"
             ));
         };
-        (price, 0.0, "official", None)
+        let cache_write_rate = if matches!(
+            canonical_model.as_str(),
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        ) {
+            price.input * 1.25
+        } else {
+            0.0
+        };
+        (price, cache_write_rate, "official", None)
     } else {
         return Err(format!(
             "unknown API price for model {model}; add a local custom price override"
         ));
     };
-    // Embedded fallback and custom rates retain the documented GPT-5.4/5.5/5.6
-    // long-context multipliers above 272K input tokens. models.dev tiers are used
-    // directly when present. Cache-write token counts are not present in Codex
-    // JSONL, so they remain pending in the cached-input bucket instead of being guessed.
+    // Embedded fallback and custom rates retain documented long-context
+    // multipliers above 272K input tokens. models.dev tiers are used directly
+    // when present. Codex JSONL does not report cache-write tokens.
     let long_context = event.long_context || event.input_tokens > 272_000;
     let mut input_rate = price.input;
     let mut cached_input_rate = price.cached_input;
@@ -293,14 +310,19 @@ fn event_cost(
         cached_input_rate = tier.cached_input;
         output_rate = tier.output;
     }
-    let documented_long_context = canonical_model.starts_with("gpt-5.4")
-        || canonical_model.starts_with("gpt-5.5")
-        || canonical_model.starts_with("gpt-5.6")
-        || canonical_model == "gpt-6-astra";
+    let documented_long_context = event.provider == "openai"
+        && (canonical_model.starts_with("gpt-5.4")
+            || canonical_model.starts_with("gpt-5.5")
+            || canonical_model.starts_with("gpt-5.6")
+            || matches!(
+                canonical_model.as_str(),
+                "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+            ));
     if !has_remote_tiers && long_context && documented_long_context {
         multiplier_input = 2.0;
         multiplier_output = 1.5;
         cached_input_rate *= multiplier_input;
+        cache_write_rate *= multiplier_input;
     }
     // `input_tokens` includes cached input and `reasoning_tokens` is an output
     // detail in Codex/Responses records. Charge each physical token once.
@@ -4252,6 +4274,123 @@ mod tests {
         assert_eq!(priced.output_multiplier, 1.5);
         assert_eq!(priced.effective_cached_input_rate, 2.0);
         assert!((priced.cost - 11.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_use_current_official_rates() {
+        for (model, input_rate, cached_rate, output_rate, standard_cost, cached_cost) in [
+            ("gpt-6-sol", 2.0, 0.2, 10.0, 1.2, 1.02),
+            ("gpt-6-luna", 0.1, 0.01, 0.5, 0.06, 0.051),
+        ] {
+            let event = UsageEvent {
+                model: model.into(),
+                input_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+                .expect("official price");
+            assert_eq!(priced.source, "official");
+            assert_eq!(priced.effective_input_rate, input_rate);
+            assert_eq!(priced.effective_cached_input_rate, cached_rate);
+            assert_eq!(priced.effective_output_rate, output_rate);
+            assert!((priced.cost - standard_cost).abs() < 1e-12, "{model}");
+
+            let cached_event = UsageEvent {
+                model: model.into(),
+                input_tokens: 100_000,
+                cached_input_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let cached_priced = event_cost(
+                &cached_event,
+                &AppSettings::default(),
+                &PricingCatalog::default(),
+            )
+            .expect("official cached price");
+            assert!((cached_priced.cost - cached_cost).abs() < 1e-12, "{model}");
+
+            let cache_write_event = UsageEvent {
+                model: model.into(),
+                cache_write_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let cache_write_priced = event_cost(
+                &cache_write_event,
+                &AppSettings::default(),
+                &PricingCatalog::default(),
+            )
+            .expect("official cache-write price");
+            assert!(
+                (cache_write_priced.cost - input_rate * 0.125).abs() < 1e-12,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_6_fallback_does_not_override_another_provider() {
+        let event = UsageEvent {
+            model: "gpt-6-sol".into(),
+            provider: "other".into(),
+            input_tokens: 1_000_000,
+            ..UsageEvent::default()
+        };
+        assert!(event_cost(&event, &AppSettings::default(), &PricingCatalog::default()).is_err());
+        let remote = pricing::parse_catalog(
+            r#"{"other":{"models":{"gpt-6-sol":{"cost":{"input":9,"output":11}}}}}"#,
+            None,
+        )
+        .expect("provider catalog");
+        let priced = event_cost(&event, &AppSettings::default(), &remote).expect("provider price");
+        assert_eq!(priced.source, "models_dev");
+        assert_eq!(priced.cost, 9.0);
+    }
+
+    #[test]
+    fn gpt_6_catalog_cache_writes_follow_openai_long_context_rates() {
+        let remote = pricing::parse_catalog(
+            r#"{"openai":{"models":{"gpt-6-sol":{"cost":{
+                "input":2,"cache_read":0.2,"cache_write":2.5,"output":10
+            }}}}}"#,
+            None,
+        )
+        .expect("OpenAI catalog");
+        let event = UsageEvent {
+            model: "gpt-6-sol".into(),
+            input_tokens: 300_000,
+            cache_write_tokens: 100_000,
+            ..UsageEvent::default()
+        };
+        let priced = event_cost(&event, &AppSettings::default(), &remote).expect("catalog price");
+        assert_eq!(priced.source, "models_dev");
+        assert!((priced.cost - 1.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_apply_documented_long_context_rates() {
+        for (model, input_rate, cached_rate, output_rate, expected_cost) in [
+            ("gpt-6-sol", 2.0, 0.4, 10.0, 2.84),
+            ("gpt-6-luna", 0.1, 0.02, 0.5, 0.142),
+        ] {
+            let event = UsageEvent {
+                model: model.into(),
+                input_tokens: 300_000,
+                cached_input_tokens: 100_000,
+                cache_write_tokens: 100_000,
+                output_tokens: 100_000,
+                ..UsageEvent::default()
+            };
+            let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+                .expect("official long-context price");
+            assert_eq!(priced.input_multiplier, 2.0);
+            assert_eq!(priced.output_multiplier, 1.5);
+            assert_eq!(priced.effective_input_rate, input_rate);
+            assert_eq!(priced.effective_cached_input_rate, cached_rate);
+            assert_eq!(priced.effective_output_rate, output_rate);
+            assert!((priced.cost - expected_cost).abs() < 1e-12, "{model}");
+        }
     }
 
     #[test]

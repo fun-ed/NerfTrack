@@ -6,12 +6,20 @@ Pull-request CI runs the frontend, Rust, and Tauri packaging smoke checks on `ma
 
 Signing and notarization are secret-driven release steps and are not part of pull-request CI. Certificates, API keys, signing identities, generated local databases, and audit snapshots must never be committed or uploaded. NerfTrack's original source code is licensed under GPL-3.0-only; third-party components retain their respective licenses.
 
-## 1.1.8 — 2026-09-20
+## 1.1.8 (fork) — 2026-09-25
 
 - Added cumulative API-equivalent usage views for supported local harnesses and profiles.
 - Removed automatic GitHub update checks; manual checks use this fork's release repository.
+- Integrated upstream v1.1.7 GPT-6 Sol/Luna pricing and Fast/long-context rates without removing multi-harness support.
 
-## 1.1.7 — 2026-09-20
+## 1.1.7 (upstream) — 2026-09-24
+
+- Added offline API-equivalent prices for GPT-6 Sol ($2 input, $0.20 cached input, $10 output) and GPT-6 Luna ($0.10 input, $0.01 cached input, $0.50 output), per 1M tokens.
+- Applied GPT-6 long-context and Fast-mode rates and made the pricing-rule revision reprice existing stored usage.
+
+Validation: Prettier, ESLint, frontend typecheck, 59 frontend tests, Rust formatting, Clippy across all targets and features, 110 Rust tests, Tauri app build, installation, ad-hoc signing, and installed-bundle verification.
+
+## 1.1.7 (fork) — 2026-09-20
 
 - Added local multi-harness usage aggregation for Codex, Claude profiles, OMP, Copilot, and Kiro.
 - Added provider-specific models.dev pricing with cache-write token accounting and the All Harness dashboard panel.
